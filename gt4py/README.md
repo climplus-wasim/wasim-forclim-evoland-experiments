@@ -97,6 +97,11 @@ NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/dynamic_phenology.py <dump dir> <r
 python3 gt4py/richards.py <dump dir> <run dir>/control.wasim.intern [--fix]
 # routing, lakes and reservoirs (#12): WaSiM built with routing/wasim-routing-dump.patch (see validate.py)
 python3 gt4py/routing/validate.py --run <run dir> --dump <routing dump dir>
+# the driver (#14): chained run of all ported processes from WaSiM's state at step 0, every process compared
+# after every step; dumps with one WaSiM run per dump point (the binary with the grid and routing dump hooks)
+python3 gt4py/chained_dumps.py --binary <wasim with routing dump> --template doubs48.wasim.in --case-dir <Doubs> --dump <dump dir> --runs <runs dir>
+NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/chained.py <dump dir> <runs dir> [--case rhone] [--steps 48] [--no-check]
+OMP_NUM_THREADS=1 python3 gt4py/ensemble_benchmark.py <dump dir> <runs dir>   # members as extra cells, E = 1, 4, 16
 ```
 
 The Doubs setup is `sample-run-doubs.zip`.

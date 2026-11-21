@@ -19,8 +19,9 @@ so that the comparison of everything else stays exact:
     model's results on these cells are taken from after_unsatzon (they are not compared);
   - the zonal post-runs (travel-time zones, linear reservoirs, the runoff per subbasin) and the
     river-flow table's infiltration: the routing's inputs qges_soil, infilt and infilt_frac and the
-    lake-cell inputs q_downext and PrecOnLakes come from the routing dump (routing_in); every grid the
-    post-runs change is compared at after_post_run and then fed (none should be).
+    lake-cell inputs q_downext and PrecOnLakes come from the routing dump (routing_in); the soil and snow
+    grids are compared at after_post_run (the zonal part changes none of them; ET's post-run, the total
+    real evapotranspiration, is ported).
 
 Dumps: chained_dumps.py (one WaSiM run per dump point, the binary with the grid and routing dump hooks):
   python3 chained_dumps.py --binary WASIM --template doubs48.wasim.in --case-dir Doubs --dump DUMP --runs RUNS
@@ -44,19 +45,6 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "routing"))
 
-from wasim_gt.cells import CellLayout
-from wasim_gt.driver import model as dm
-from wasim_gt.driver import state as ds
-from wasim_gt.processes import groundwater as gwp
-from wasim_gt.processes import potential_et as pet
-from wasim_gt.processes import routing as rp
-from wasim_gt.processes import routing_tables as rt
-from wasim_gt.processes import vegetation as veg
-from wasim_gt.processes.radiation_correction import Shading
-from wasim_gt.processes.snow_slides import SLIDE_NEIGHBOURS, visiting_order
-from wasim_gt.processes.sun import Site
-from wasim_gt.soil import richards as rz
-
 import groundwater as gwv
 import potential_et as petv
 import richards as rzv
@@ -64,9 +52,21 @@ import vegetation as vegv
 from dump import RoutingDump
 from glacier_melt import debris_scaling, ice_firn_parameters
 from snow_energy_balance import snow_parameters
-from wasim_gt.processes.glacier_melt import GlacierMeltParameters
 from validate import Mapping, compare_state, config_from_run, inflow_series, lake_inputs, state_from_dump
 from wasim_dump import Dump, landuse_table
+
+from wasim_gt.cells import CellLayout
+from wasim_gt.driver import model as dm
+from wasim_gt.driver import state as ds
+from wasim_gt.processes import groundwater as gwp
+from wasim_gt.processes import potential_et as pet
+from wasim_gt.processes import routing_tables as rt
+from wasim_gt.processes import vegetation as veg
+from wasim_gt.processes.glacier_melt import GlacierMeltParameters
+from wasim_gt.processes.radiation_correction import Shading
+from wasim_gt.processes.snow_slides import SLIDE_NEIGHBOURS, visiting_order
+from wasim_gt.processes.sun import Site
+from wasim_gt.soil import richards as rz
 
 NODATA = -9999.0
 LAYERS = 2
@@ -190,7 +190,7 @@ class Setup:
         opts, fd_zone, sr_zone = rzv.unsatzon_options(text)
         opts.cellsize = cellsize
         tables = rz.soil_tables(rzv.soil_types(text))
-        self.levels = nl = tables.levels
+        self.levels = tables.levels
         lu = rzv.landuse_parameters(text)
         kind = np.full(n, rz.COLUMN, dtype=np.int64)
         self.has_glacier = d.has("start", "GlacierizedCells")
@@ -252,7 +252,7 @@ class Setup:
                                 gwp.topology(cells), glacier_cfg, self.rtables)
 
     def initial_state(self):
-        d, s0, n, nl = self.d, self.s0, self.n, self.levels
+        s0, n = self.s0, self.n
         stack = lambda name: np.pad(s0(name), ((0, 0), (0, 1)))  # noqa: E731  [N, L+1] -> [N, L+2]
         out = np.zeros((rz.NOUT, n))
         for row, name in SOIL_ROWS.items():  # states, and the fluxes of the last step (kept on glacier cells)
@@ -451,7 +451,8 @@ class Checker:
         self.glacier(p, state, h, fluxes=False)
 
     def after_post_run(self, state, h):
-        """The post-runs are not ported: compare what they may change, then take WaSiM's values."""
+        """After the post-runs (total real ET ported; the soil's zonal part is not, and changes no cell grid
+        here): compare the soil and snow, and what the routing will read on lake cells."""
         p = "after_post_run"
         self.soil(p, state, self.everywhere, feed=False)
         for g, f in SNOW.items():
@@ -460,10 +461,11 @@ class Checker:
         # what the routing will read on lake cells, against WaSiM's routing input
         lakes = self.s.forcing_routing["expected_lake_inputs"]
         lake = self.s.config.et.lake > 0
+        # (q_downext and PrecOnLakes are not computed by the driver: fed from routing_in, see the docstring)
         mine = np.where(lake, np.array([state.soil.pond, state.soil.etr[0], h["interception_evaporation"][0],
-                                        lakes[3], state.soil.out[rz.O_DELTAGW], lakes[5]]), 0.0)
-        for k, g in enumerate(("POND", "ETR", "EI", "q_downext", "baseflow", "PrecOnLakes")):
-            bad, diff = mismatch(mine[k][lake], lakes[k][lake])
+                                        state.soil.out[rz.O_DELTAGW]]), 0.0)
+        for k, (g, row) in enumerate((("POND", 0), ("ETR", 1), ("EI", 2), ("baseflow", 4))):
+            bad, diff = mismatch(mine[k][lake], lakes[row][lake])
             r = self.results.setdefault(("routing_in (lake cells)", g), [0.0, 0, 0])
             r[0], r[1], r[2] = max(r[0], diff if bad.any() else 0.0), r[1] + int(bad.sum()), r[2] + 1
             if bad.any() and self.first is None:
