@@ -60,6 +60,8 @@ Warm, single thread, same machine unless noted. ms per call (= per step):
 | snow part 1, method 7 | gt:cpu_ifirst | about 3 | | 1.68 / 6.38 | wasim-gt#19, macOS arm64 |
 | unsaturated zone (Richards, #7), 1 thread | DaCe | 39.7 (36.4–45.2) | 80.1 (73.7–90.1) | 70.5 / 122.7 | `richards.py`, see below |
 | unsaturated zone (Richards, #7), 4 threads | DaCe | 21.8 (15.1–22.6) | 73.2 (50.6–75.1) | 50.6 / 90.0 | `richards.py`, see below |
+| Richards with the river-link row (#8), 1 thread | DaCe | 42.7 (39.2–47.0) | 80.7 (73.5–87.8) | 70.5 / 122.7 | `richards.py`, see below |
+| Richards with the river-link row (#8), 4 threads | DaCe | 25.6 (14.8–28.3) | 44.2 (30.3–45.1) | 50.6 / 90.0 | `richards.py`, see below |
 | glacier dynamics (yearly, host) | — | | about 4 s per run | (not separable: inside snow part 2 on one day) | wasim-gt#24 |
 
 **Richards zone (#7).** 48-step runs (Doubs 48, Rhone 71 hourly steps from 2021-01-01 01:00), WaSiM
@@ -69,6 +71,14 @@ without the gather from the dumps; both measured back to back on the shared 4-co
 average of about 4 (other agents), so absolute numbers are noisy. The DaCe build leaves out
 ScalarToSymbolPromotion (DaCe defect), and the rows are mapped in parallel (columns of a row in order, as
 WaSiM's row buffer requires).
+
+**River-link row (#8).** Same runs and measure, the #7 build ("before") and the #8 build ("after") back to back,
+twice, on the same dumps (load about 2; medians of the two repetitions): Doubs 1 thread 38.8/39.5 ms before
+(5,590 cells) and 44.5/40.9 ms after (6,022 cells, the 432 river-link cells now computed in their own row,
++7.7 % cells); 4 threads 22.4/28.6 before and 22.7/28.4 after (the river-link row runs in parallel with the
+ordinary rows, as in WaSiM's OpenMP loop). Rhone (surface interaction 1, only the cell-order indirection
+is new): 77.9/79.5 before, 78.5/82.9 after on 1 thread; 46.5/46.5 and 43.9/44.4 on 4 threads. The table
+rows above give the mean of the two "after" medians (smallest min – largest mean of the two).
 
 ## What the numbers say
 

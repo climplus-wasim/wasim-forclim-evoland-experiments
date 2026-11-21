@@ -1,0 +1,78 @@
+--- a/src/unsatzon.cc	2026-11-21 14:48:28.530849156 +0000
++++ b/src/unsatzon.cc	2026-11-21 16:56:33.989876327 +0000
+@@ -5266,6 +5266,26 @@
+ 
+ //#pragma optimize ("p",on)
+ /* calculation of infiltration into soil from rivers */
++
++/* port aid (#8): dump the river-flow table (flowm3s, speed, infilt_amount, infilt_fraction per index
++   0..zonmax) to $WASIM_DUMP_RFT/<tag>.f64 (appended per call), and once the processing order of the
++   river-link row (rft_order.txt: i j link zarray[link] z) and zarray. Changes nothing in the model. */
++#include <cstdlib>
++static void rft_dump(const char *tag, riverflow_table_type *t, int zonmax)
++{
++	const char *d = getenv("WASIM_DUMP_RFT");
++	if (!d || !*d || !t) return;
++	std::string fn = std::string(d) + "/" + tag + ".f64";
++	FILE *f = fopen(fn.c_str(), "ab");
++	if (!f) return;
++	for (int i = 0; i <= zonmax; i++)
++	{
++		double v[4] = { t[i].flowm3s, t[i].speed, t[i].infilt_amount, t[i].infilt_fraction };
++		fwrite(v, sizeof(double), 4, f);
++	}
++	fclose(f);
++}
++
+ void   unsatzonmodellklasse::calc_surface_interaction(int i,int j,int lr,
+ double* &gwin,double* &gwex,double* &conc_gwin,
+ double* &thetares, double* &thetasat, double* &theta_sl_old,double* &theta_average,
+@@ -8074,6 +8094,7 @@
+ //#endif
+ //	}
+ 
++	rft_dump("rft_run_start", riverflow_table, zonmax);
+ 	if (surface_interaction > 1)
+ 	{
+ 		MPISyncRivLnkCells1(); // even if not in MPI mode, all RiverLink-Cells will be processed seperately in a new re-ordered grid row. This routine fills that row and sets it's address to mpistartrow-1
+@@ -8085,6 +8106,23 @@
+ 		{
+ 			startrow = mpistartrow - 1;
+ 		}
++		{
++			static bool order_done = false;
++			const char *d = getenv("WASIM_DUMP_RFT");
++			if (d && *d && !order_done)
++			{
++				order_done = true;
++				FILE *f = fopen((std::string(d) + "/rft_order.txt").c_str(), "w");
++				if (f)
++				{
++					fprintf(f, "# zonmax %d zonmaxwert %d substepcnt %d cells_in_row0 %d\n", (int)zonmax, (int)zonmaxwert, (int)substepcnt, (int)(FirstLastCol[0].Last + 1));
++					for (int r = 0; r < (int)(*RiverLinkVector).size(); r++)
++						for (std::vector<RiverLinkCell>::iterator it = (*RiverLinkVector)[r]->linkCellVector->begin(); it != (*RiverLinkVector)[r]->linkCellVector->end(); it++)
++							fprintf(f, "%d %d %d %d %.17g\n", it->i, it->j, it->link, (int)zarray[it->link], it->z);
++					fclose(f);
++				}
++			}
++		}
+ //#if defined _MPI && defined _MPIDEBUG
+ #if defined _MPI 
+ 		MPI_Barrier(MPI_COMM_WORLD);
+@@ -11718,7 +11756,7 @@
+ //			rivflow.close();
+ //		}
+ //#endif
+-		MPISyncRivLnkCells2(); // get the values from the extra grid row for in-order-processing of the river link cells and put them into the original cells.
++		MPISyncRivLnkCells2(); rft_dump("rft_run_end", riverflow_table, zonmax); // get the values from the extra grid row for in-order-processing of the river link cells and put them into the original cells.
+ //#ifdef _DEBUG
+ //		{
+ //			ofstream rivflow;
+@@ -13114,6 +13152,7 @@
+ 
+ 	// gathering all re-infiltrated amounts from all ranks for further processing in routing model
+ 	MPIGatherRiverFlowTable();
++	rft_dump("rft_post_run", riverflow_table, zonmax);
+ 
+ //	QDsum/=count;
+ 

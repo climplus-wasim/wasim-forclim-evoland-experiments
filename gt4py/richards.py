@@ -6,9 +6,11 @@ it and the call only the pre-runs of the soil, surface-routing, ET and groundwat
 with one module sub-step they change no cell grid: the soil pre_run shifts the travel-time zone
 registers, see gt4py/richards.md §2), the results are compared with the dump after_unsatzon, for
 every step and every active cell. Each step starts from WaSiM's own state, so a difference cannot
-propagate. Option set: Doubs and Rhone golden cases (gt4py/richards.md §1). Cells with a river link
-under surface interaction 2 (Doubs) are computed by WaSiM in a separate ordered row with the
-river-flow table of the routing (#8) and are not ported: they are left out of the comparison.
+propagate. Option set: Doubs and Rhone golden cases (gt4py/richards.md §1). Under surface
+interaction 2 (Doubs) the cells with a river link are computed in WaSiM's separate ordered row with the
+river-flow table of the routing (#8): their order comes from the elevation model as read (the file
+named in [elevation_model] of CONTROL_INTERN, an ASCII grid), the table from the river-flow table dump
+below, and the table after the module and after post_run is compared as well.
 
 Dump grids (both points unless marked):
   theta, hydraulic_heads, q_down, groundwater_level, groundwater_distance, Theta_in_GWLEVEL, baseflow,
@@ -23,6 +25,10 @@ Dump grids (both points unless marked):
   ETR2ETP.
 Points: after_siltingup,after_unsatzon. Template: golden/<case>/control.wasim.in with the end date
 moved (48 steps: $endday = 3).
+River-flow table (surface interaction 2 only): WaSiM 11.01.01 (eab8916) with the table dump hook
+gt4py/richards_rft_dump.patch applied to src/unsatzon.cc (env WASIM_DUMP_RFT=<DUMP_DIR>, same run):
+rft_run_start.f64 / rft_run_end.f64 / rft_post_run.f64 (per call: zonmax+1 records of flowm3s, speed,
+infilt_amount, infilt_fraction) and rft_order.txt (WaSiM's river-link row, checked against ours).
 
 The port is a DaCe program on the model cells (wasim_gt.cells): grids are gathered to cells, the
 program runs, and its outputs are compared with the dump on the same cells. --python runs the same
@@ -142,6 +148,36 @@ def unsatzon_options(text):
     return opts, dict(zip(zones, dr)), dict(zip(zones, sdf))
 
 
+def ascii_grid(path):
+    """ESRI ASCII grid as written for WaSiM (6 header lines), as float64 rows x cols."""
+    with open(path, encoding="latin-1") as f:
+        head = [next(f).split() for _ in range(6)]
+        ncols, nrows = int(head[0][1]), int(head[1][1])
+        vals = np.array(f.read().split(), dtype=np.float64)
+    return vals[:nrows * ncols].reshape(nrows, ncols)
+
+
+def river_flow_dump(dump_dir):
+    """River-flow table dumps {name: (calls, zonmax+1, 4)} (flowm3s, speed, infilt_amount, infilt_fraction)."""
+    import os
+    head = open(os.path.join(dump_dir, "rft_order.txt")).readline().split()
+    nz = int(head[head.index("zonmax") + 1]) + 1
+    out = {}
+    for name in ("rft_run_start", "rft_run_end", "rft_post_run"):
+        out[name] = np.fromfile(os.path.join(dump_dir, name + ".f64")).reshape(-1, nz, 4)
+    return out, nz
+
+
+def check_link_order(dump_dir, cells, link_cells, lnk):
+    """Our river-link row against WaSiM's (rft_order.txt: row col link zarray[link] elevation, 1-based)."""
+    import os
+    ref = np.loadtxt(os.path.join(dump_dir, "rft_order.txt"), comments="#", ndmin=2)
+    mine = np.c_[cells.rows[link_cells] + 1, cells.cols[link_cells] + 1, lnk[link_cells]]
+    if mine.shape != (ref.shape[0], 3) or not np.array_equal(mine, ref[:, [0, 1, 3]].astype(np.int64)):
+        raise SystemExit("river-link row differs from WaSiM's (rft_order.txt)")
+    print(f"river-link row: {len(link_cells)} cells, same order and table indices as WaSiM")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dump_dir")
@@ -183,9 +219,21 @@ def main():
     if d.has(PRE, "GlacierizedCells"):
         ice = np.clip(st0("GlacierizedCells"), 0.0, 1.0)
         kind[ice == 1.0] = rz.GLACIER
+    rivlnk = st0("river_links")
+    rftab = rft = None
+    lnk = np.zeros(n, dtype=np.int64)
     if opts.surface_interaction > 1:
-        kind[st0("river_links") != NODATA] = rz.SKIP
-    row_start = rz.rows_of(cells.rows, opts.fix_htemp1)
+        dem = cells.to_cells(ascii_grid(section(text, "elevation_model")[0]))
+        order, row_start, skip = rz.cell_order(cells.rows, rivlnk, dem, opts.surface_interaction, opts.fix_htemp1)
+        kind[skip] = rz.SKIP
+        zgrid = d(PRE, "zonegrid_soilmodel")[0]
+        lnk = rz.link_index(rivlnk, zgrid[zgrid > NODATA + 1])
+        rft, nz = river_flow_dump(args.dump_dir)
+        if not args.rows:
+            check_link_order(args.dump_dir, cells, order[:row_start[1]], lnk)
+    else:
+        order, row_start = np.arange(n, dtype=np.int64), rz.rows_of(cells.rows, opts.fix_htemp1)
+    nlink = int(row_start[1]) if opts.surface_interaction > 1 else 0
     soil = st0("soil_types").astype(np.int64)
     zcode = st0("zonegrid_soilmodel").astype(np.int64)
     # zones without own parameters take those of the next lower zone (unsatzon.cc:888-1010)
@@ -255,8 +303,11 @@ def main():
         state = dict(theta=stack(PRE, "theta", t), hh=stack(PRE, "hydraulic_heads", t), hgeo=hgeo.copy(),
                      qu=stack(PRE, "q_down", t),
                      etr=np.ascontiguousarray([g(PRE, f"real_transpiration{v}", t) for v in range(nv + 1)]), out=out)
+        if rft is not None:
+            rftab = rz.RiverFlowTable(*(np.ascontiguousarray(rft["rft_run_start"][t][:, j]) for j in range(4)))
         start = time.perf_counter()
-        rz.richards(opts, tables, row_start, kind, inputs, state, python=args.python)
+        rz.richards(opts, tables, row_start, kind, inputs, state, python=args.python, order=order, lnk=lnk,
+                    table=rftab)
         t_run.append(time.perf_counter() - start)
         iters.append(out[rz.O_ITER][comp].sum())
         splits.append(out[rz.O_SUBSTEPS][comp].sum())
@@ -282,10 +333,18 @@ def main():
             check(f"real_transpiration{v}", state["etr"][v], g(POST, f"real_transpiration{v}", t), comp | glac)
         for i, name in compare.items():
             check(name, out[i], g(POST, name, t), comp | (glac if i in cleared else np.zeros(n, bool)))
+        if rftab is not None:
+            every = np.ones(nz, bool)
+            check("riverflow infilt_amount (run)", rftab.infilt, rft["rft_run_end"][t][:, 2], every)
+            check("riverflow infilt_fraction (run)", rftab.infilt_frac, rft["rft_run_end"][t][:, 3], every)
+            rz.gather_river_flow_table(rftab)
+            check("riverflow infilt_amount (post_run)", rftab.infilt, rft["rft_post_run"][t][:, 2], every)
+            check("riverflow infilt_fraction (post_run)", rftab.infilt_frac, rft["rft_post_run"][t][:, 3], every)
 
     steps = last - args.first
-    print(f"grid {mask.shape[0]} x {mask.shape[1]}, {n} cells: {comp.sum()} computed, {glac.sum()} fully glacierised, "
-          f"{(kind == rz.SKIP).sum()} river-link cells not ported; {nl} levels, {steps} steps, "
+    print(f"grid {mask.shape[0]} x {mask.shape[1]}, {n} cells: {comp.sum()} computed ({nlink} river-link cells "
+          f"in their own row), {glac.sum()} fully glacierised, {(kind == rz.SKIP).sum()} not computed by WaSiM; "
+          f"{nl} levels, {steps} steps, "
           f"{'plain Python' if args.python else 'DaCe'}, {'independent columns (fix)' if args.fix else 'row buffer carried'}")
     print(f"sub-steps per cell and step {np.sum(splits) / steps / max(comp.sum(), 1):.2f}, "
           f"iterations per cell and step {np.sum(iters) / steps / max(comp.sum(), 1):.2f}")
