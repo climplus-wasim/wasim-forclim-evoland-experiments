@@ -62,6 +62,9 @@ python3 tests/golden/run_case.py --binary <wasim> --template gt4py/doubs_snow_ti
     --case-dir path/to/Doubs --out runs/doubs_snow_tindex
 python3 gt4py/snow_tindex.py runs/doubs_snow_tindex path/to/Doubs/StateIni_2021 \
     path/to/Doubs/Input/grids/doubs500.lake_IDs2
+# exact per-step check of the DaCe T-index and snow evaporation, on grid dumps of the same run (grids and points: see its docstring)
+python3 gt4py/snow_tindex.py runs/doubs_snow_tindex path/to/Doubs/StateIni_2021 \
+    path/to/Doubs/Input/grids/doubs500.lake_IDs2 --dump <dump dir>
 
 # meteo interpolation and precipitation correction: 48 steps, exact numeric equality
 # Requires CONTROL_FILE.intern and supplemental static dumps (see meteo_interpolation.py).
@@ -71,10 +74,11 @@ python3 gt4py/meteo_interpolation.py <dump dir> <run dir>/control.wasim <case di
 python3 gt4py/interception.py <dump dir> <run dir>/control.wasim          # golden Doubs setup, interception method 11
 python3 gt4py/snow_evaporation.py <dump dir>                              # T-index setup (doubs_snow_tindex.wasim.in)
 python3 gt4py/snow_evaporation.py <dump dir> --energy-balance --pre after_snow1   # golden setup, snow method 7
-python3 gt4py/permafrost.py <dump dir> <run dir>/control.wasim         # Rhone variant with the permafrost model on (see its docstring)
+python3 gt4py/permafrost.py <dump dir> <run dir>/control.wasim         # Rhone variant rhone_permafrost.wasim.in (see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim   # golden Doubs setup, snow method 7 (grids and points: see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells   # Rhone
-python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # Rhone summer variant, glacier method 13 (see its docstring)
+python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # rhone_glacier_melt(_debris).wasim.in, glacier method 13 (see its docstring)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_pointwise.py   # warm time per call of the DaCe snow evaporation, T-index, permafrost and glacier melt
 python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics (see its docstring)
 python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++; the DaCe functions inside a map
 # radiation correction and potential ET (dumps after_meteo, after_expokorr, after_etp; see the script's header)
