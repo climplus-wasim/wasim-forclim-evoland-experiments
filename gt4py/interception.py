@@ -6,15 +6,17 @@ because irrigation is off); the results are compared with the dump after_interce
 step and active cell. Methods 1 and 11, several vegetation layers. See the module docstring in
 wasim-gt for what is ported.
 
-usage: interception.py DUMP_DIR CONTROL_FILE [--backend embedded|gtfn_cpu]
+The port is a DaCe program on the model cells (wasim_gt.cells): grids are gathered to cells, the
+program runs, and its outputs are compared with the dump on the same cells.
+
+usage: interception.py DUMP_DIR CONTROL_FILE
 """
 import argparse
 import time
 
 import numpy as np
-import gt4py.next as gtx
 
-from wasim_gt.fields import I, J
+from wasim_gt.cells import CellLayout
 from wasim_gt.processes.interception import Layer, interception
 
 from wasim_dump import Dump, landuse_table
@@ -26,7 +28,6 @@ def main():
     ap.add_argument("control_file", help="the filled control file of the run (run_case.py writes it to the output directory)")
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--sidicke", type=float, default=0.35)
-    ap.add_argument("--backend", default="embedded", choices=["embedded", "gtfn_cpu"])
     args = ap.parse_args()
 
     d = Dump(args.dump_dir)
@@ -46,10 +47,10 @@ def main():
                 c[lu == code] = v
         return c
 
-    dom = gtx.domain({I: nrows, J: ncols})
-    fld = lambda a: gtx.as_field(dom, np.where(active, a, 0.0))
-    msk = lambda a: gtx.as_field(dom, a & active)
-    ice = gtx.zeros(dom, dtype=gtx.float64)  # no glaciers in the Doubs setup
+    cells = CellLayout.from_mask(active)
+    fld = cells.to_cells
+    msk = lambda a: cells.to_cells(a, dtype=bool)
+    ice = np.zeros(cells.n)  # no glaciers in the Doubs setup
 
     names = {"ei": "interception_evaporation", "q": "throughfall", "si": "interception_storage", "etp": "pot_transpiration"}
     worst = {(k, l): 0.0 for k in names for l in range(nl + 1)}
@@ -63,19 +64,19 @@ def main():
                         storage=fld(d(pre, f"interception_storage{l}")[t]),
                         has_vegetation=msk(has_veg[l - 1][t]))
                   for l in range(1, nl + 1)]
-        res = interception(fld(prec[t]), layers, fld(d(pre, "pot_transpiration0")[t]), ice, dom, backend=args.backend)
+        res = interception(fld(prec[t]), layers, fld(d(pre, "pot_transpiration0")[t]), ice)
         t_run += time.perf_counter() - start
         for (k, l) in worst:
             ref = d(post, f"{names[k]}{l}")[t]
-            diff = np.abs(res[l][k].asnumpy() - ref)[active]
+            diff = np.abs(res[l][k] - fld(ref))
             worst[(k, l)] = max(worst[(k, l)], float(diff.max()))
 
-    print(f"grid {nrows} x {ncols}, {active.sum()} active cells, {nl} vegetation layers, {nsteps} steps, backend {args.backend}")
-    print(f"{1000 * t_run / nsteps:.1f} ms per step including host-device copies (first step includes compilation)")
+    print(f"grid {nrows} x {ncols}, {cells.n} active cells, {nl} vegetation layers, {nsteps} steps, DaCe")
+    print(f"{1000 * t_run / nsteps:.2f} ms per step including the gather to cells (first step includes compilation)")
     print("largest absolute difference to WaSiM over all steps and active cells [mm]:")
     for (k, l), v in worst.items():
         print(f"  {names[k]}{l}: {v:.3g}")
-    return 0 if max(worst.values()) <= 1e-12 else 1
+    return 0 if max(worst.values()) == 0.0 else 1
 
 
 if __name__ == "__main__":
