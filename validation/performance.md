@@ -67,6 +67,10 @@ cells is in neither:
 | T-index snow (method 1, run1 part) | DaCe | 0.20 / 6.9 | 0.45 / 3.5 | (inside snow part 1) | |
 | permafrost | DaCe | 0.28 / 5.6 | 0.26 / 3.4 | (inside snow part 1) | |
 | glacier melt, method 13 (every cell glacierized, 7 firn layers) | DaCe | 0.25 / 4.5 | 0.50 / 5.6 | (inside snow part 1) | |
+| snow part 1, method 7 (one call; daily steps make two) | DaCe, compiled call | 1.61 | 4.45 | 1.68 / 6.38 | `benchmark_snow_glacier.py`, this container, `OMP_NUM_THREADS=1` |
+| snow slides (part 2) | DaCe, compiled call | 0.42 | 1.46 | 1.29 / 5.52 (whole part 2) | same |
+| glacier mass balance (part 2, every step) | DaCe, compiled call | | 0.2 | (inside part 2) | same |
+| glacier dynamics (yearly update, 532 glaciers) | DaCe, wrapper | | 80–100 ms per evaluation day | (inside part 2 on one day) | same; Rhone summer and January variants |
 
 ## What the numbers say
 

@@ -20,9 +20,11 @@ Grids to dump (WASIM_DUMP_GRIDS), at points start,after_meteo,after_interception
 The golden Doubs setup never reaches the slide threshold (35 degrees; its steepest cell has 34).
 Lowering it in the control file ("minimum slope for creating slides", e.g. to 20) exercises the slides.
 
+The ports are DaCe programs on the model cells (wasim_gt.cells): grids are gathered to cells, the programs
+run, and their outputs are compared with the dumps on the same cells.
+
 usage: snow_energy_balance.py DUMP_DIR CONTROL_FILE [--pre after_interception] [--input throughfall0]
-                              [--ice GlacierizedCells] [--no-lakes] [--backend gt:cpu_ifirst]
-                              [--step-minutes 1440 --start 2021-01-01]
+                              [--ice GlacierizedCells] [--no-lakes] [--step-minutes 1440 --start 2021-01-01]
 
   Doubs (interception method 11, before snow):  defaults
   Rhone (interception method 1, after snow; glaciers):  --pre after_irrigation --input precipitation --ice GlacierizedCells
@@ -41,8 +43,9 @@ import time
 
 import numpy as np
 
+from wasim_gt.cells import CellLayout
 from wasim_gt.processes.snow_energy_balance import SnowParameters, snow_energy_balance
-from wasim_gt.processes.snow_slides import snow_slides
+from wasim_gt.processes.snow_slides import SLIDE_NEIGHBOURS, snow_slides, visiting_order
 from wasim_gt.processes.sun import Site, daylight
 
 from wasim_dump import Dump
@@ -138,7 +141,6 @@ def main():
     ap.add_argument("control_file", help="the filled control file of the run (run_case.py writes it to the output directory)")
     ap.add_argument("--pre", default="after_interception", help="dump point just before the snow model, part 1")
     ap.add_argument("--input", default="throughfall0", help="the snow model's input grid (throughfall0 or precipitation)")
-    ap.add_argument("--backend", default="gt:cpu_ifirst")
     ap.add_argument("--no-lakes", action="store_true", help="the lake model is off")
     ap.add_argument("--ice", default=None, help="glacier grid (GlacierizedCells or ice_firn): cells with ice are not "
                     "ported (issue #5) and are left out of the comparison")
@@ -166,6 +168,10 @@ def main():
         check &= ~(ice > 0)
         print(f"{(active & (ice > 0)).sum()} glacierized cells left out")
 
+    cells = CellLayout.from_mask(active)
+    tc = cells.to_cells
+    check_c = tc(check, dtype=bool)
+    all_c = np.ones(cells.n, dtype=bool)
     compare1 = {"precipitation": args.input, "snow_fraction": "snow_fraction", "rain_fraction": "rain_fraction",
                 "snowstorage_solid": "snowstorage_solid", "snowstorage_liquid": "snowstorage_liquid",
                 "snow_storage_total": "snow_storage_total", "snowtemp": "snowtemp", "surftemp": "surftemp",
@@ -173,17 +179,18 @@ def main():
                 "melt_from_snowcover": "melt_from_snowcover", "days_snow": "days_snow",
                 "snow_evaporation": "snow_evaporation"}
     worst1 = dict.fromkeys(compare1, 0.0)
-    t_run = 0.0
+    t_run, calls1 = [], 0
+    elevation_c = tc(elevation)
     for t in range(nsteps):
-        g = lambda name, point=pre: d(point, name)[t]
-        no_snow = np.zeros(active.shape)
+        g = lambda name, point=pre: tc(d(point, name)[t])
+        no_snow = np.zeros(cells.n)
         if not args.no_lakes:
             no_snow = ((g("lake_codes") > 0) & (g("ponding_storage") > 0)).astype(float)
         inputs = dict(temperature=g("corr_temperature"), precipitation=g(args.input),
                       deposition_index=g("deposition_index"), air_humidity=g("air_humidity"),
                       cloudiness=g("cloudiness"), radiation=g("AspectCorrectedGlobalRadiation"),
-                      wind_speed=g("wind_speed"), elevation=elevation, landuse_albedo=lu_alb[t], no_snow=no_snow,
-                      active=active.astype(float), snowstorage_solid=g("snowstorage_solid"),
+                      wind_speed=g("wind_speed"), elevation=elevation_c, landuse_albedo=tc(lu_alb[t]),
+                      no_snow=no_snow, active=np.ones(cells.n), snowstorage_solid=g("snowstorage_solid"),
                       snowstorage_liquid=g("snowstorage_liquid"), snowtemp=g("snowtemp"),
                       surftemp=g("surftemp"), snow_age=g("snow_age"))
         light = {}
@@ -193,41 +200,49 @@ def main():
             light = dict(dark_fraction=dl.dark, bright_fraction=dl.bright)
             inputs["temperature_night"] = g("temperature_night")
         start = time.perf_counter()
-        res = snow_energy_balance(inputs, params, args.step_minutes, backend=args.backend, **light)
-        t_run += time.perf_counter() - start
+        res = snow_energy_balance(inputs, params, args.step_minutes, **light)
+        t_run.append(time.perf_counter() - start)
+        calls1 += 2 if daily else 1
         for k, name in compare1.items():
-            worst1[k] = max(worst1[k], difference(res[k], g(name, post), check))
+            worst1[k] = max(worst1[k], difference(res[k], g(name, post), check_c))
 
     worst2 = dict.fromkeys(["snow_storage_total", "snowstorage_liquid", "snowstorage_solid",
                             "input_mass", "mobile_mass", "deposition"], 0.0)
-    zone = d("start", "[zone_grid]")[0]
-    fractions = [d("start", f"slidefraction{k}")[0] for k in range(1, 5)]
-    static = dict(active=active, zone=zone, slope=d("start", "slope_angle")[0], slide_fractions=fractions,
-                  deposition_max=d("start", "max_deposition")[0], elev_order_row=d("start", "elev_order_row")[0],
-                  elev_order_col=d("start", "elev_order_col")[0], **slide)
+    s0 = lambda name: tc(d("start", name)[0])
+    static = dict(zone=s0("[zone_grid]"), slope=s0("slope_angle"),
+                  slide_fractions=[s0(f"slidefraction{k}") for k in range(1, 5)],
+                  deposition_max=s0("max_deposition"),
+                  order=visiting_order(cells, d("start", "elev_order_row")[0], d("start", "elev_order_col")[0]),
+                  neighbours=cells.neighbours(SLIDE_NEIGHBOURS), **slide)
+    ice_c = None
     if args.ice:  # the slides are ported for glacierized cells too: compare all cells, and the snow on glaciers
-        static["ice"] = d("start", args.ice)[0]
+        ice_c = s0(args.ice)
+        static["ice"] = ice_c
         for k in GLACIER_SNOW:
             worst2[k] = 0.0
     n_slides = 0
+    t_slides = []
     nsub = d("after_gwflow", "snow_storage_total").shape[0] // nsteps  # records per step: one per sub step
     for t in range(nsteps):
-        g = lambda name, point: d(point, name)[t]
-        last = lambda name: d("after_gwflow", name)[(t + 1) * nsub - 1]
+        last = lambda name: tc(d("after_gwflow", name)[(t + 1) * nsub - 1])
         glacier = tuple(last(k) for k in GLACIER_SNOW) if args.ice else None
+        start = time.perf_counter()
         states, slide_grids, glacier_states = snow_slides(
-            last("snow_storage_total"), last("snowstorage_liquid"), last("snowstorage_solid"), glacier=glacier, **static)
-        n_slides += int((slide_grids[0][active] > 0).sum())
+            last("snow_storage_total"), last("snowstorage_liquid"), last("snowstorage_solid"), glacier=glacier,
+            **static)
+        t_slides.append(time.perf_counter() - start)
+        n_slides += int((slide_grids[0] > 0).sum())
         results = (*states, *slide_grids, *(glacier_states or ()))
         for k, v in zip(worst2, results):
-            ref = g(k, "after_snow2")
-            cells = active & (ref > -9999) if k in GLACIER_SNOW else (active if args.ice else check)
+            ref = tc(d("after_snow2", k)[t])
+            mask = (ref > -9999) if k in GLACIER_SNOW else (all_c if args.ice else check_c)
             if args.ice and k in ("snow_storage_total", "snowstorage_liquid", "snowstorage_solid"):
-                cells = active & ~(static["ice"] >= 1.0)  # fully glacierized cells have no snow off the glacier
-            worst2[k] = max(worst2[k], difference(v, ref, cells))
+                mask = ~(ice_c >= 1.0)  # fully glacierized cells have no snow off the glacier
+            worst2[k] = max(worst2[k], difference(v, ref, mask))
 
-    print(f"{active.sum()} active cells, {nsteps} steps, backend {args.backend}, "
-          f"{1000 * t_run / nsteps:.1f} ms per step for part 1 (first step includes compilation)")
+    warm = lambda ts: 1000 * float(np.median(ts[1:])) if len(ts) > 1 else float("nan")
+    print(f"{cells.n} active cells, {nsteps} steps, DaCe; warm time per step (median, without the gather): "
+          f"part 1 {warm(t_run):.3f} ms ({calls1 // nsteps} program call(s) per step), slides {warm(t_slides):.3f} ms")
     print(f"part 1 ({pre} -> after_snow1), largest absolute difference to WaSiM over all steps and active cells"
           f" ({unobserved} cell-steps used an unobserved land-use albedo):")
     for k, v in worst1.items():
@@ -236,7 +251,6 @@ def main():
     for k, v in worst2.items():
         print(f"  {k}: {v:.3g}")
     return 0 if max(*worst1.values(), *worst2.values()) == 0.0 else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

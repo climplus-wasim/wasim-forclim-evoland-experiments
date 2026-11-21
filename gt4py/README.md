@@ -81,6 +81,10 @@ python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07
 OMP_NUM_THREADS=1 python3 gt4py/benchmark_pointwise.py   # warm time per call of the DaCe snow evaporation, T-index, permafrost and glacier melt
 python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics (see its docstring)
 python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++; the DaCe functions inside a map
+python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells --step-minutes 1440 --start 2021-01-01   # Rhone daily (golden/rhone/daily_jan.wasim.in)
+python3 gt4py/glacier_dynamics.py --zero-glacier-snow <copy of the Rhone case>/StateIni_2021   # prepares the summer variant
+python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics, gt4py/rhone_glacier_summer.wasim.in (see its docstring)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_snow_glacier.py snow|glacier <dump dir> <run dir>/control.wasim ...   # warm time per call of the DaCe programs
 # radiation correction and potential ET (dumps after_meteo, after_expokorr, after_etp; see the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-06-01T24 --cellsize 500 --backend gtfn_cpu  # Rhone daily
