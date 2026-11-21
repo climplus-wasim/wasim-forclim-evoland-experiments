@@ -3,10 +3,11 @@
 
 Builds the C++ reference from the WaSiM sources (extract_reference.sh), evaluates h_calc, k_calc
 and get_theta for N random soil horizons with one random query each, and reports the largest
-differences. Includes edge cases: table suctions, h <= 0, theta at or beyond thetar and thetas,
+differences. The port is a set of DaCe functions; here they run inside a map over the queries
+(wasim_gt.soil.van_genuchten.hydraulic_functions), as they will inside the Richards column program. Includes edge cases: table suctions, h <= 0, theta at or beyond thetar and thetas,
 frozen soil (SE < 1), converted thetar/thetas.
 
-usage: test_van_genuchten.py WASIM_SRC_DIR [--n 20000] [--backend gt:cpu_ifirst]
+usage: test_van_genuchten.py WASIM_SRC_DIR [--n 20000] [--seed 1]
 """
 import argparse
 import os
@@ -15,28 +16,10 @@ import tempfile
 import time
 
 import numpy as np
-import gt4py.cartesian.gtscript as gs
-import gt4py.storage as gts
-from gt4py.cartesian.gtscript import PARALLEL, computation, interval
 
-from wasim_gt.soil.van_genuchten import H_TAB, get_theta, h_calc, k_calc
+from wasim_gt.soil.van_genuchten import H_TAB, evaluate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-def build_stencil(backend):
-    @gs.stencil(backend=backend)
-    def vg(htab: gs.Field[gs.IJ, (np.float64, (31,))],
-           ts: gs.Field[np.float64], tr: gs.Field[np.float64], alpha: gs.Field[np.float64],
-           n: gs.Field[np.float64], m: gs.Field[np.float64], tau: gs.Field[np.float64],
-           theta: gs.Field[np.float64], se: gs.Field[np.float64], h: gs.Field[np.float64],
-           trx: gs.Field[np.float64], tsx: gs.Field[np.float64],
-           out_h: gs.Field[np.float64], out_k: gs.Field[np.float64], out_t: gs.Field[np.float64]):
-        with computation(PARALLEL), interval(...):
-            out_h = h_calc(htab, theta, ts, tr, alpha, n, m, trx, tsx)
-            out_k = k_calc(htab, theta, se, ts, tr, alpha, n, m, tau, trx, tsx)
-            out_t = get_theta(htab, h, ts, tr, alpha, n, m, trx, tsx)
-    return vg
 
 
 def random_cases(count, rng):
@@ -84,7 +67,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("--n", type=int, default=20000)
-    ap.add_argument("--backend", default="gt:cpu_ifirst")
     ap.add_argument("--seed", type=int, default=1)
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
@@ -92,18 +74,13 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         ref_h, ref_k, ref_t = reference(args.src, c, tmp)
 
-    shape = (args.n, 1, 1)
-    st = lambda a: gts.from_array(np.asarray(a, dtype="f8").reshape(shape), backend=args.backend, aligned_index=(0, 0, 0))
-    htab = gts.zeros((args.n, 1), (np.float64, (31,)), backend=args.backend, aligned_index=(0, 0))
-    htab[...] = H_TAB[None, None, :]
-    outs = [st(np.zeros(args.n)) for _ in range(3)]
     t0 = time.perf_counter()
-    vg = build_stencil(args.backend)
+    args_ = [c[k] for k in ("ts", "tr", "alpha", "n", "m", "tau", "theta", "h", "se", "trx", "tsx")]
+    evaluate(*(v[:1] for v in args_))  # compile (or load from the cache)
     t1 = time.perf_counter()
-    vg(htab, *(st(c[k]) for k in ("ts", "tr", "alpha", "n", "m", "tau", "theta", "se", "h", "trx", "tsx")), *outs)
+    mine = evaluate(*args_)
     t2 = time.perf_counter()
-    mine = [np.asarray(o).ravel() for o in outs]
-    print(f"{args.n} random soil horizons and queries, backend {args.backend} (build {t1 - t0:.1f} s, run {1000 * (t2 - t1):.1f} ms)")
+    print(f"{args.n} random soil horizons and queries, DaCe (build {t1 - t0:.1f} s, run {1000 * (t2 - t1):.1f} ms)")
     worst = 0.0
     for name, a, b in zip(("h_calc", "k_calc", "get_theta"), mine, (ref_h, ref_k, ref_t)):
         same = np.sum(a == b)

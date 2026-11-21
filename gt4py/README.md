@@ -66,7 +66,6 @@ python3 gt4py/snow_tindex.py runs/doubs_snow_tindex path/to/Doubs/StateIni_2021 
 # meteo interpolation and precipitation correction: 48 steps, exact numeric equality
 # Requires CONTROL_FILE.intern and supplemental static dumps (see meteo_interpolation.py).
 python3 gt4py/meteo_interpolation.py <dump dir> <run dir>/control.wasim <case dir> --static-dir <static dump dir>
-python3 gt4py/meteo_interpolation.py <dump dir> <run dir>/control.wasim <case dir> --backend gtfn_cpu --static-dir <static dump dir>
 
 # the newer checks read grid dumps (coupling.md, "How the ports are validated")
 python3 gt4py/interception.py <dump dir> <run dir>/control.wasim          # golden Doubs setup, interception method 11
@@ -77,7 +76,7 @@ python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim   # gold
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells   # Rhone
 python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # Rhone summer variant, glacier method 13 (see its docstring)
 python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics (see its docstring)
-python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++
+python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++; the DaCe functions inside a map
 # radiation correction and potential ET (dumps after_meteo, after_expokorr, after_etp; see the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-06-01T24 --cellsize 500 --backend gtfn_cpu  # Rhone daily
@@ -95,4 +94,4 @@ constructor, which explicitly disables them. Missing-value patterns must also ma
 compiled CPU checks, use a compiler with OpenMP, set `CXXFLAGS=-ffp-contract=off`, put the
 venv's CMake/Ninja on `PATH`, and use a fresh `GT4PY_BUILD_CACHE_DIR` after changing flags.
 
-`groundwater.py DUMP_DIR CONTROL_FILE --backend embedded|gtfn_cpu --json RESULT.json` compares all active cells and substeps at `after_etreal` → `after_gwflow`, including head, flow, balance and explicit soil/river handovers (target exactly zero).
+`groundwater.py DUMP_DIR CONTROL_FILE --json RESULT.json` (DaCe, on the model cells) compares all active cells and substeps at `after_etreal` → `after_gwflow`, including head, flow, balance and explicit soil/river handovers (target exactly zero).

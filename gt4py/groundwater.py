@@ -10,7 +10,12 @@ river infiltration/exfiltration. The first gw_head_old_old_1 registration aliase
 old_head and the hook selects it. True forelast/iteration history is not dumped.
 No river table is needed: groundwater stores its address but never reads it.
 
-Usage: python gt4py/groundwater.py DUMP_DIR CONTROL_FILE --backend gtfn_cpu --json result.json
+The port is a DaCe program on the model cells (wasim_gt.cells, the cells of the zone grid): grids
+are gathered to cells, the program runs, and its outputs are compared with the dump on the same
+cells. warm_mean_ms is the time of the program call per substep (without gathering), from the
+second substep on.
+
+Usage: python gt4py/groundwater.py DUMP_DIR CONTROL_FILE --json result.json
 CONTROL_FILE may be control.wasim or its resolved control.wasim.intern. The latter
 is preferred. No case data or legacy parser belongs to wasim-gt.
 """
@@ -18,14 +23,12 @@ import argparse
 import json
 import pathlib
 import re
-import time
 from dataclasses import replace
 
-import gt4py.next as gtx
 import numpy as np
 
-from wasim_gt.fields import I, J
-from wasim_gt.processes.groundwater import Forcing, Parameters, State, groundwater
+from wasim_gt.cells import CellLayout
+from wasim_gt.processes.groundwater import Forcing, Parameters, State, groundwater, topology
 
 OUTPUTS = ('gw_head_1', 'gw_head_old_1', 'gw_head_old_old_1',
            'gw_transmissivity_x_1', 'gw_transmissivity_y_1', 'gw_flow_x_1', 'gw_flow_y_1',
@@ -98,26 +101,28 @@ def compare_array(actual, expected, active, nodata=-9999.0):
     return dict(ok=not len(indices), max_abs=float(delta.max()), patterns=patterns, first=first)
 
 
-def compare(directory, control, backend, steps=None):
+def compare(directory, control, steps=None):
     dump = Records(directory)
     config = read_parameters(control)
     zone = dump.get('start', '[zone_grid]')
-    active = np.isfinite(zone) & (zone != -9999.0)
-    field = lambda array: gtx.as_field((I, J), np.asarray(array, dtype='f8'))
-    static = lambda name: field(dump.get('start', name))
+    layout = CellLayout.from_mask(np.isfinite(zone) & (zone != -9999.0))
+    topo = topology(layout)
+    cells = lambda array: layout.to_cells(array)
+    static = lambda name: cells(dump.get('start', name))
     params = Parameters(*(static(n) for n in ('[zone_grid]', '[elevation_model]', 'aquifer_thickness_1',
         'aquifer_upper_limit1', 'gw_k_x_1', 'gw_k_y_1', 'gw_storage_coeff_1', 'gw_boundary_fix_h_1',
         'gw_boundary_fix_q_1', 'CellSizeX', 'CellSizeY')), **config)
     results = {name: dict(ok=True, max_abs=0.0, patterns={}, first=None) for name in OUTPUTS}
-    times, sweeps, iterations, oscillations, errors = [], [], [], [], []
+    times, iterations, oscillations, errors = [], [], [], []
     history = static("gw_head_1")
     iteration_history = history
+    everywhere = np.ones(layout.n, dtype=bool)
     for step in range(min(steps or dump.count, dump.count)):
-        before = lambda name, step=step: field(dump.get('after_etreal', name, step))
+        before = lambda name, step=step: cells(dump.get('after_etreal', name, step))
         state = State(before('gw_head_1'), before('gw_head_old_1'), history, iteration_history,
                       *(before(n) for n in ('gw_flow_x_1', 'gw_flow_y_1', 'gw_balance1', 'baseflow')))
         ice_name = 'GlacierizedCells' if ('after_etreal', 'GlacierizedCells') in dump.arrays else 'ice_firn'
-        ice = before(ice_name) if ('after_etreal', ice_name) in dump.arrays else field(np.zeros(zone.shape))
+        ice = before(ice_name) if ('after_etreal', ice_name) in dump.arrays else np.zeros(layout.n)
         optional = lambda name, before=before: before(name) if ('after_etreal', name) in dump.arrays else None
         forcing = Forcing(*(before(n) for n in ('groundwater_distance', 'ponding_storage', 'gw_leakage_1',
             'groundwater_recharge', 'river_infiltration', 'river_exfiltration')), ice,
@@ -127,10 +132,8 @@ def compare(directory, control, backend, steps=None):
              ("k_x", "gw_k_x_1"), ("k_y", "gw_k_y_1"), ("storage", "gw_storage_coeff_1"),
              ("fixed_head", "gw_boundary_fix_h_1"), ("fixed_flux", "gw_boundary_fix_q_1"),
              ("dx", "CellSizeX"), ("dy", "CellSizeY")]})
-        start = time.perf_counter()
-        result = groundwater(state, dynamic_params, forcing, backend=backend)
-        times.append(time.perf_counter() - start)
-        sweeps.append(result.sweep_seconds)
+        result = groundwater(state, dynamic_params, forcing, topo)
+        times.append(result.seconds)  # the program call only, without gathering and copies
         iterations.append(result.iterations)
         oscillations.append(result.oscillations)
         errors.append(result.max_error)
@@ -140,7 +143,11 @@ def compare(directory, control, backend, steps=None):
                   result.transmissivity_y, st.flow_x, st.flow_y, st.balance, st.baseflow, result.leakage,
                   result.recharge, result.river_infiltration, result.river_exfiltration)
         for name, output in zip(OUTPUTS, fields, strict=True):
-            got = compare_array(output.asnumpy(), dump.get('after_gwflow', name, step), active)
+            got = compare_array(output[:, None], cells(dump.get('after_gwflow', name, step))[:, None],
+                                everywhere[:, None])
+            if got['first'] is not None:  # cell index -> grid row and column (1-based, as WaSiM)
+                c = got['first']['row'] - 1
+                got['first'].update(row=int(layout.rows[c]) + 1, column=int(layout.cols[c]) + 1)
             summary = results[name]
             summary['ok'] &= got['ok']
             summary['max_abs'] = max(summary['max_abs'], got['max_abs'])
@@ -150,9 +157,9 @@ def compare(directory, control, backend, steps=None):
                 summary['first'] = dict(substep=step + 1, iterations=result.iterations, **got['first'])
         if any(not v['ok'] for v in results.values()):
             break
-    return dict(ok=all(v['ok'] for v in results.values()), backend=backend, substeps=len(times),
-                available_substeps=dump.count, active_cells=int(active.sum()), parameters=config, grids=results,
-                seconds_per_substep=times, sweep_seconds=sweeps, iterations=iterations, oscillations=oscillations,
+    return dict(ok=all(v['ok'] for v in results.values()), substeps=len(times),
+                available_substeps=dump.count, active_cells=layout.n, parameters=config, grids=results,
+                seconds_per_substep=times, iterations=iterations, oscillations=oscillations,
                 final_errors=errors, warm_mean_ms=1000.0 * np.mean(times[1:]) if len(times) > 1 else None)
 
 
@@ -160,11 +167,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('dump_dir')
     parser.add_argument('control_file')
-    parser.add_argument('--backend', choices=['embedded', 'gtfn_cpu'], default='embedded')
     parser.add_argument('--json')
     parser.add_argument('--steps', type=int)
     args = parser.parse_args()
-    result = compare(args.dump_dir, args.control_file, args.backend, args.steps)
+    result = compare(args.dump_dir, args.control_file, args.steps)
     text = json.dumps(result, indent=2)
     if args.json:
         pathlib.Path(args.json).write_text(text + '\n')
