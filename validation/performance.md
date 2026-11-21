@@ -61,6 +61,8 @@ cells is in neither:
 | | gtfn_cpu | 22 | 31 | | |
 | of which the Gauss-Seidel sweep (host Python) | | 6 | 14 | | |
 | snow part 1, method 7 | gt:cpu_ifirst | about 3 | | 1.68 / 6.38 | wasim-gt#19, macOS arm64 |
+| unsaturated zone (Richards, #7), 1 thread | DaCe | 39.7 (36.4–45.2) | 80.1 (73.7–90.1) | 70.5 / 122.7 | `richards.py`, see below |
+| unsaturated zone (Richards, #7), 4 threads | DaCe | 21.8 (15.1–22.6) | 73.2 (50.6–75.1) | 50.6 / 90.0 | `richards.py`, see below |
 | glacier dynamics (yearly, host) | — | | about 4 s per run | (not separable: inside snow part 2 on one day) | wasim-gt#24 |
 | snow evaporation, conventional (2 layers) | DaCe, compiled SDFG / `@dace.program` call | 0.14 / 3.1 | 0.30 / 3.1 | 0.14 / 0.39 | `benchmark_pointwise.py` |
 | snow evaporation, energy balance | DaCe | 0.11 / 4.4 | 0.25 / 2.8 | | |
@@ -71,6 +73,14 @@ cells is in neither:
 | snow slides (part 2) | DaCe, compiled call | 0.42 | 1.46 | 1.29 / 5.52 (whole part 2) | same |
 | glacier mass balance (part 2, every step) | DaCe, compiled call | | 0.2 | (inside part 2) | same |
 | glacier dynamics (yearly update, 532 glaciers) | DaCe, wrapper | | 80–100 ms per evaluation day | (inside part 2 on one day) | same; Rhone summer and January variants |
+
+**Richards zone (#7).** 48-step runs (Doubs 48, Rhone 71 hourly steps from 2021-01-01 01:00), WaSiM
+`after_siltingup -> after_unsatzon` from `WASIM_TIMING` (contains the soil pre_run and the zonal statistics,
+and in Doubs the 432 river-link cells the port leaves out), DaCe per call: median (min–mean) over the steps,
+without the gather from the dumps; both measured back to back on the shared 4-core machine at a load
+average of about 4 (other agents), so absolute numbers are noisy. The DaCe build leaves out
+ScalarToSymbolPromotion (DaCe defect), and the rows are mapped in parallel (columns of a row in order, as
+WaSiM's row buffer requires).
 
 ## What the numbers say
 
