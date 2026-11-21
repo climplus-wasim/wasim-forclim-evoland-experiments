@@ -73,6 +73,7 @@ cells is in neither:
 | snow slides (part 2) | DaCe, compiled call | 0.42 | 1.46 | 1.29 / 5.52 (whole part 2) | same |
 | glacier mass balance (part 2, every step) | DaCe, compiled call | | 0.2 | (inside part 2) | same |
 | glacier dynamics (yearly update, 532 glaciers) | DaCe, wrapper | | 80–100 ms per evaluation day | (inside part 2 on one day) | same; Rhone summer and January variants |
+| routing, lakes, reservoirs (one sub-step) | DaCe (sequential, 1 thread) | 0.16 | 1.51 | 0.41 / 2.97 (this machine, same runs) | `routing/validate.py`, wasim-dace#12 |
 
 **Richards zone (#7).** 48-step runs (Doubs 48, Rhone 71 hourly steps from 2021-01-01 01:00), WaSiM
 `after_siltingup -> after_unsatzon` from `WASIM_TIMING` (contains the soil pre_run and the zonal statistics,
