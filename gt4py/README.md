@@ -75,8 +75,11 @@ python3 gt4py/snow_evaporation.py <dump dir> --energy-balance --pre after_snow1 
 python3 gt4py/permafrost.py <dump dir> <run dir>/control.wasim         # Rhone variant with the permafrost model on (see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim   # golden Doubs setup, snow method 7 (grids and points: see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells   # Rhone
+python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells --step-minutes 1440 --start 2021-01-01   # Rhone daily (golden/rhone/daily_jan.wasim.in)
 python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # Rhone summer variant, glacier method 13 (see its docstring)
-python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics (see its docstring)
+python3 gt4py/glacier_dynamics.py --zero-glacier-snow <copy of the Rhone case>/StateIni_2021   # prepares the summer variant
+python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics, gt4py/rhone_glacier_summer.wasim.in (see its docstring)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_snow_glacier.py snow|glacier <dump dir> <run dir>/control.wasim ...   # warm time per call of the DaCe programs
 python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++
 # radiation correction and potential ET (dumps after_meteo, after_expokorr, after_etp; see the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01

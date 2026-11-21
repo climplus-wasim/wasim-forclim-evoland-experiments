@@ -59,6 +59,10 @@ Warm, single thread, same machine unless noted. ms per call (= per step):
 | of which the Gauss-Seidel sweep (host Python) | | 6 | 14 | | |
 | snow part 1, method 7 | gt:cpu_ifirst | about 3 | | 1.68 / 6.38 | wasim-gt#19, macOS arm64 |
 | glacier dynamics (yearly, host) | — | | about 4 s per run | (not separable: inside snow part 2 on one day) | wasim-gt#24 |
+| snow part 1, method 7 (one call; daily steps make two) | DaCe, compiled call | 1.61 | 4.45 | 1.68 / 6.38 | `benchmark_snow_glacier.py`, this container, `OMP_NUM_THREADS=1` |
+| snow slides (part 2) | DaCe, compiled call | 0.42 | 1.46 | 1.29 / 5.52 (whole part 2) | same |
+| glacier mass balance (part 2, every step) | DaCe, compiled call | | 0.2 | (inside part 2) | same |
+| glacier dynamics (yearly update, 532 glaciers) | DaCe, wrapper | | 80–100 ms per evaluation day | (inside part 2 on one day) | same; Rhone summer and January variants |
 
 ## What the numbers say
 
