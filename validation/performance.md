@@ -59,6 +59,7 @@ Warm, single thread, same machine unless noted. ms per call (= per step):
 | of which the Gauss-Seidel sweep (host Python) | | 6 | 14 | | |
 | snow part 1, method 7 | gt:cpu_ifirst | about 3 | | 1.68 / 6.38 | wasim-gt#19, macOS arm64 |
 | glacier dynamics (yearly, host) | — | | about 4 s per run | (not separable: inside snow part 2 on one day) | wasim-gt#24 |
+| routing, lakes, reservoirs (one sub-step) | DaCe (sequential, 1 thread) | 0.16 | 1.51 | 0.41 / 2.97 (this machine, same runs) | `routing/validate.py`, wasim-dace#12 |
 
 ## What the numbers say
 
