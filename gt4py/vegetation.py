@@ -15,15 +15,24 @@ record, missing rs_interception and rs_evaporation get WaSiM's defaults (20 and 
 code at the start of a record is not used for the lookup: WaSiM replaces the codes in the
 land-use grids by the record's position (defltuzr.cc:1825), so the dumped grids hold positions.
 
+The port is a DaCe program on the model cells (wasim_gt.cells, cells of the zone grid): grids are
+gathered to cells, the program runs, and its outputs are compared with the dump on the same cells.
+
+Reference runs: the golden Doubs setup (golden/doubs/control.wasim.in, 10 days hourly) and Rhone
+daily (golden/rhone/year_daily.wasim.in, all of 2021). Dump at after_meteo: [zone_grid],
+[elevation_model], landuse1..n and the grids in GRIDS per layer, SurfaceEvaporationResistance, albedo.
+
 usage: vegetation.py DUMP_DIR CONTROL_INTERN START [--layers N]
    START: first step as in WaSiM's input data, e.g. 2021-01-01T01 (hourly) or 2021-01-01T24 (daily)
 """
 import argparse
 import datetime
 import re
+import time
 
 import numpy as np
 
+from wasim_gt.cells import CellLayout
 from wasim_gt.processes import vegetation as veg
 
 from wasim_dump import Dump
@@ -104,11 +113,14 @@ def main():
     d = Dump(args.dump_dir)
     p = "after_meteo"
     active = d(p, "[zone_grid]")[0] > -9999
-    dhm = d(p, "[elevation_model]")[0]
-    luse = [d(p, f"landuse{n}")[0] for n in range(1, args.layers + 1)]
+    cells = CellLayout.from_mask(active)
+    fld = cells.to_cells
+    dhm = fld(d(p, "[elevation_model]")[0])
+    luse = [fld(d(p, f"landuse{n}")[0]) for n in range(1, args.layers + 1)]
     # the initialisation uses the elevation model as read, before the lake model lowers lake cells
     # (lake initialisation method 2); the daily updates use the lowered one
-    dem_file = initial_dem(text, dhm.shape)
+    dem_file = fld(initial_dem(text, active.shape))
+    tables = veg.Table.from_table(table)
     nsteps = d(p, "leaf_area_index1").shape[0]
     grids = {(k, n): f"{g}{n}" for k, g in GRIDS.items() for n in range(1, args.layers + 1)}
     grids[("rse", 0)] = "SurfaceEvaporationResistance"
@@ -122,6 +134,7 @@ def main():
     unchanged = {g: 0 for g in grids.values()}
     updates = 0
     first = None
+    t_run = []
     for t in range(nsteps):
         now = start + datetime.timedelta(minutes=step * t)
         day, month, year, hr = now.day, now.month, now.year, now.hour
@@ -131,11 +144,13 @@ def main():
         if first is None:
             first = (day, month, year)
         if veg.is_day_end(hr, 0, hour_offset):
-            res = veg.vegetation_parameters(table, luse, dhm, active, day, month, year)
+            t1 = time.perf_counter()
+            res = veg.vegetation_parameters(table, luse, dhm, day, month, year, tables=tables)
+            t_run.append(time.perf_counter() - t1)
             updates += 1
             check_albedo = True
         elif t == 0:
-            res = veg.vegetation_parameters(table, luse, dem_file, active, *first, initial=True)
+            res = veg.vegetation_parameters(table, luse, dem_file, *first, initial=True, tables=tables)
             check_albedo = False
         else:
             for (key, n), g in grids.items():
@@ -146,10 +161,12 @@ def main():
             if key == "albedo" and not check_albedo:
                 continue
             v = res[key] if n == 0 else res["layers"][n - 1][key]
-            worst[g] = max(worst[g], float(np.abs(v - data[g][t])[active].max()))
+            worst[g] = max(worst[g], float(np.abs(v - fld(data[g][t])).max()))
 
-    print(f"{active.sum()} active cells, {nsteps} steps of {step:g} min from {args.start}, "
-          f"{updates} day-end updates, {len(table)} land uses")
+    print(f"{cells.n} active cells, {nsteps} steps of {step:g} min from {args.start}, "
+          f"{updates} day-end updates, {len(table)} land uses, DaCe")
+    if len(t_run) > 1:
+        print(f"warm ms per day-end update (median, without the gather to cells): {1000 * np.median(t_run[1:]):.2f}")
     print("largest absolute difference to WaSiM (initialisation and day-end steps); steps where WaSiM changed "
           "the grid between updates:")
     for g in grids.values():

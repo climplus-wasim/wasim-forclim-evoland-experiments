@@ -1,0 +1,194 @@
+diff --git a/src/abfluss.cc b/src/abfluss.cc
+index d605bb9..98bf431 100644
+--- a/src/abfluss.cc
++++ b/src/abfluss.cc
+@@ -4245,6 +4245,7 @@ void abflussmodellklasse::SetRunoffMeasure(int p_runoff_measure)
+ }
+ 
+ 
++#include "routing_dump.inc"
+ void abflussmodellklasse::run(long me,long se, long tg, long mt, long jr, int actsubtimestep,int numsubtimesteps)
+ {
+ 	int i,j,z,routindex,actindex;
+@@ -4339,6 +4340,8 @@ void abflussmodellklasse::run(long me,long se, long tg, long mt, long jr, int ac
+ 	teilmodellklasse::run(me,se,tg,mt,jr,NULL,additionalinfo);
+ #endif
+ 
++	{ static bool rdump_setup_done = false; if (!rdump_setup_done) { rdump_setup(this); rdump_setup_done = true; } }
++	rdump_state(this, "routing_in", me, se, tg, mt, jr, actsubtimestep, numsubtimesteps);
+ 	/* set maxirrig to 0. This is an indicator within the routing-method, 
+ 	that the tributary is a 1st-level-river (irrigation water has to 
+ 	be abstracted from the inflow, not from routed fluxes) */
+@@ -4682,6 +4685,7 @@ there are no considerations of exceeding amounts from upstream areas that could
+ 		}
+ 		tracer_module[z].stat->calc_and_done(jahr,monat,tag,stunde,minute);
+ 	}
++	rdump_state(this, "routing_out", me, se, tg, mt, jr, actsubtimestep, numsubtimesteps);
+ 	if (mpi_rank==0) 
+ 	{
+ 		MPIScatterGridWithMask(pondindex,lakeindex,lakeCellsPerMPIRank); // will be called for rank >0 at the beginning of the ::run method
+diff --git a/src/routing_dump.inc b/src/routing_dump.inc
+new file mode 100644
+index 0000000..8e25719
+--- /dev/null
++++ b/src/routing_dump.inc
+@@ -0,0 +1,159 @@
++/* Debug aid for porting the routing model (wasim-dace #12): with WASIM_ROUTING_DUMP=<dir> set, the full state
++   of the discharge routing is appended as raw float64 to <dir>/<point>.f64 at each call of
++   abflussmodellklasse::run ("routing_in" at the start, "routing_out" at the end), and the tables built at
++   initialisation once to <dir>/routing_setup.f64. <dir>/<point>.layout lists the records ("name count")
++   of one call. Nothing is changed in the model. Lake cells are those of each reservoir's bounding box with
++   LAKE == SP_code, in the row-major order the lake model visits them. */
++#include <vector>
++#include <string>
++struct RDumpRec { std::string name; std::vector<double> v; };
++static void rdump_write(const char *point, std::vector<RDumpRec> &recs)
++{
++	const char *d = getenv("WASIM_ROUTING_DUMP");
++	if (!d || !*d) return;
++	static std::vector<std::string> seen;
++	std::string base = std::string(d) + "/" + point;
++	bool first = true;
++	for (auto &s : seen) if (s == base) first = false;
++	if (first)
++	{
++		seen.push_back(base);
++		FILE *l = fopen((base + ".layout").c_str(), "w");
++		if (l) { for (auto &r : recs) fprintf(l, "%s %zu\n", r.name.c_str(), r.v.size()); fclose(l); }
++	}
++	FILE *f = fopen((base + ".f64").c_str(), first ? "wb" : "ab");
++	if (!f) return;
++	for (auto &r : recs) if (!r.v.empty()) fwrite(r.v.data(), sizeof(double), r.v.size(), f);
++	fclose(f);
++}
++
++static void rdump_state(abflussmodellklasse *m, const char *point, long me, long se, long tg, long mt, long jr, int act, int num)
++{
++	const char *d = getenv("WASIM_ROUTING_DUMP");
++	if (!d || !*d) return;
++	std::vector<RDumpRec> recs;
++	auto add = [&](std::string name) -> std::vector<double>& { recs.push_back(RDumpRec{name, {}}); return recs.back().v; };
++	{ auto &v = add("date"); v = {(double)jr, (double)mt, (double)tg, (double)se, (double)me, (double)act, (double)num}; }
++	{ auto &v = add("qges_soil"); for (int i = 1; i <= m->zonmax; i++) v.push_back(m->Qges_uebernommen[0][i]); }
++	int nq = m->zonmax + 1 + m->anz_ZL + 1 + m->anz_AL + 1;
++	{ auto &v = add("qges"); for (int i = 0; i < nq; i++) v.push_back(m->Qges[0][i]); }
++	{ auto &v = add("q12ges"); for (int j = 1; j <= m->p_subint; j++) for (int i = 0; i <= m->zonmax + m->anz_ZL; i++) v.push_back(m->Q12ges[0][j][i]); }
++	{
++		auto &v = add("riverflow");
++		if (m->riverflow_table)
++			for (int i = 1; i <= m->zonmax; i++)
++			{
++				riverflow_table_type &r = m->riverflow_table[i];
++				v.insert(v.end(), {r.flow_mm[0], r.flowm3s, r.speed, r.upstream_area, r.infilt_amount, r.infilt_fraction});
++			}
++	}
++	for (int r = 1; r <= m->anzrout; r++)
++	{
++		routingclass *R = m->routing[r];
++		for (int i = 1; i <= R->OLs + R->SUMTRIBs + R->ZLs; i++)
++		{
++			auto &w = R->wqtab[i];
++			int n = (int)w.n;
++			int geb = i <= R->OLs + R->SUMTRIBs ? m->zarray[R->OL[i]] : R->ZL[i - R->OLs - R->SUMTRIBs] + m->zonmax;
++			std::string p = "r" + std::to_string(r) + "c" + std::to_string(i) + "_";
++			{ auto &v = add(p + "last_index"); for (int j = 1; j <= n; j++) v.push_back(w.last_index[j]); }
++			{ auto &v = add(p + "ueberrollt"); for (int j = 1; j <= n; j++) v.push_back(w.ueberrollt[0][j]); }
++			{ auto &v = add(p + "qvzuq"); for (int j = 1; j <= n; j++) v.push_back(w.qvzuq[j]); }
++			{ auto &v = add(p + "qaus"); for (int j = 1; j <= n; j++) for (int k = 1; k <= R->subint; k++) v.push_back(w.Qaus[j][k]); }
++			{ auto &v = add(p + "fluss"); for (int k = 1; k <= R->subint + w.n12t; k++) v.push_back(m->fluss[0][geb][k]); }
++		}
++		for (int s = 1; s <= R->SPs; s++)
++		{
++			SP_class &S = R->Speicher[s];
++			std::string p = "r" + std::to_string(r) + "s" + std::to_string(s) + "_";
++			{ auto &v = add(p + "state"); v = {S.Vakt[0], S.Abakt, S.actWaterLevel, S.AREAm2, S.deltaPond, S.Vold ? S.Vold[0] : NAN, (double)S.V_hist.size()}; }
++			{ auto &v = add(p + "balance"); v = {S.QINm3, S.QOUTm3, S.IRRIGm3, S.QGWm3, S.ETRm3, S.PRECm3, S.DVm3, S.ABSTRm3, S.ERRm3,
++				S.lake_active ? S.GetWaterLevelByVolume(S.Vakt[0]) : 0.0}; }
++			auto &v = add(p + "lake");
++			if (S.lake_active && S.LAKE)
++				for (int i = S.startrow; i <= S.endrow; i++)
++					for (int j = S.startcol; j <= S.endcol; j++)
++						if (S.LAKE[i][j] == S.SP_code)
++							v.insert(v.end(), {S.POND[i][j], S.ETR ? S.ETR[i][j] : NAN, S.EI ? S.EI[i][j] : NAN, S.qu ? S.qu[i][j] : NAN,
++								S.DELTAGW ? S.DELTAGW[i][j] : NAN, S.PREC ? S.PREC[i][j] : NAN});
++		}
++		for (int a = 1; a <= R->ALs; a++)
++		{
++			AL_class &A = R->Abstraction[a];
++			std::string p = "r" + std::to_string(r) + "a" + std::to_string(a) + "_";
++			auto &v = add(p + "state");
++			v = {A.Abakt[0], (A.AL_buffer && A.AL_bufcnt > 0) ? A.AL_buffer[A.AL_bufcnt][5] : NAN};
++		}
++	}
++	rdump_write(point, recs);
++}
++
++static void rdump_setup(abflussmodellklasse *m)
++{
++	const char *d = getenv("WASIM_ROUTING_DUMP");
++	if (!d || !*d) return;
++	std::vector<RDumpRec> recs;
++	auto add = [&](std::string name) -> std::vector<double>& { recs.push_back(RDumpRec{name, {}}); return recs.back().v; };
++	{ auto &v = add("sizes"); v = {(double)m->zonmax, (double)m->anz_ZL, (double)m->anz_AL, (double)m->p_subint, (double)m->anzrout,
++		(double)(m->zoneSW != NULL), (double)(m->riverflow_table != NULL), (double)m->lake_active, (double)m->gem_Zul, (double)m->tracer_count,
++		(double)m->timestepfactor, (double)m->runoff_measure, (double)m->InV}; }
++	{ auto &v = add("grid"); v = {(double)m->nrows, (double)m->ncols, m->cellsize, m->nodata}; }
++	{ auto &v = add("zone_code"); for (int i = 0; i <= m->zonmax; i++) v.push_back(m->zone[i].zonenwert); }
++	{ auto &v = add("zone_n"); for (int i = 0; i <= m->zonmax; i++) v.push_back(m->zone[i].n); }
++	{ auto &v = add("zone_rel"); for (int i = 0; i <= m->zonmax; i++) v.push_back(m->zone[i].rel); }
++	{
++		double **zn = m->gridinfo[m->getindex(_Zonengrid_Bodenmodell_)].pointer;
++		auto &v = add("zone_grid"); for (int i = 1; i <= m->nrows; i++) for (int j = 1; j <= m->ncols; j++) v.push_back(zn[i][j]);
++	}
++	{
++		auto &v = add("lake_grid");
++		if (m->ist_vorhanden(_LAKE_CODES_))
++		{
++			double **lk = m->gridinfo[m->getindex(_LAKE_CODES_)].pointer;
++			for (int i = 1; i <= m->nrows; i++) for (int j = 1; j <= m->ncols; j++) v.push_back(lk[i][j]);
++		}
++	}
++	{ auto &v = add("abfrel0"); for (int i = 0; i <= m->zonmax; i++) v.push_back(m->abfrel[0][i]); }
++	{ auto &v = add("abfrel1"); for (int i = 0; i <= m->zonmax; i++) v.push_back(m->abfrel[1][i]); }
++	{ auto &v = add("rtarget2"); for (int i = 0; i <= m->zonmax; i++) v.push_back(m->rtarget[2][i]); }
++	for (int r = 1; r <= m->anzrout; r++)
++	{
++		routingclass *R = m->routing[r];
++		std::string p = "r" + std::to_string(r) + "_";
++		{ auto &v = add(p + "head"); v = {(double)R->TG, R->TgAe, R->TgAe_rel, (double)R->OLs, (double)R->SUMTRIBs, (double)R->ZLs, (double)R->ALs, (double)R->SPs}; }
++		{ auto &v = add(p + "gew"); for (int j = 0; j <= R->OLs + R->SUMTRIBs; j++) v.push_back(R->gew[j]); }
++		for (int i = 1; i <= R->OLs + R->SUMTRIBs + R->ZLs; i++)
++		{
++			auto &w = R->wqtab[i];
++			int nb = (int)R->intzahl[i] + 1;
++			std::string q = p + "c" + std::to_string(i) + "_";
++			{ auto &v = add(q + "head"); v = {w.n, (double)w.n12t, R->kh[i], R->kv[i], R->AE[i], R->dq[i], R->minspende[i], R->intzahl[i], (double)R->OL[i]}; }
++			{ auto &v = add(q + "delta"); for (int b = 1; b <= nb; b++) v.push_back(w.delta[b]); }
++			{ auto &v = add(q + "QvzuQ"); for (int b = 1; b <= nb; b++) v.push_back(w.QvzuQ[b]); }
++			{ auto &v = add(q + "v"); for (int b = 1; b <= nb; b++) v.push_back(w.v[b]); }
++		}
++		for (int a = 1; a <= R->ALs; a++)
++		{
++			AL_class &A = R->Abstraction[a];
++			auto &v = add(p + "a" + std::to_string(a) + "_head");
++			v = {(double)A.AL_art, (double)A.AL_code, A.AL_schwelle, A.AL_anteil, A.AL_max, A.TgAe, A.TgAe_rel,
++				(double)A.ZL_target, (double)A.ZL_flussindex, A.ZL_SourceAE, (double)A.tabmax, (double)A.rulecnt};
++		}
++		for (int s = 1; s <= R->SPs; s++)
++		{
++			SP_class &S = R->Speicher[s];
++			std::string q = p + "s" + std::to_string(s) + "_";
++			{ auto &v = add(q + "head"); v = {(double)S.SP_code, S.dTmin, (double)S.UseRunningAvg, (double)S.lake_active, (double)S.W_V_total_steps,
++				(double)S.startrow, (double)S.endrow, (double)S.startcol, (double)S.endcol, (double)S.tabmax, (double)S.rulecnt,
++				(double)S.useHydraulicConnection, (double)S.bReverseLookUp}; }
++			{ auto &v = add(q + "level"); if (S.lake_active) for (int k = 0; k < S.W_V_total_steps; k++) v.push_back(S.WaterLevel[k]); }
++			{ auto &v = add(q + "volume"); if (S.lake_active) for (int k = 0; k < S.W_V_total_steps; k++) v.push_back(S.Volume[k]); }
++			auto &v = add(q + "cells");
++			if (S.lake_active && S.LAKE)
++				for (int i = S.startrow; i <= S.endrow; i++)
++					for (int j = S.startcol; j <= S.endcol; j++)
++						if (S.LAKE[i][j] == S.SP_code) v.insert(v.end(), {(double)i, (double)j, S.dhm[i][j], S.MAXPOND[i][j]});
++		}
++	}
++	rdump_write("routing_setup", recs);
++}

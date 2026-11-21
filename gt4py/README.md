@@ -54,7 +54,7 @@ Effort is given in tokens of agent work, measured on the ports so far, in [`coup
 
 ## Running the checks
 
-The scripts import the kernels from wasim-gt, so install it first: `pip install -e path/to/wasim-gt`.
+The scripts import the kernels from wasim-gt, so install it first: `pip install -e path/to/wasim-gt` (or run them with wasim-gt's `uv run` and `PYTHONPATH=gt4py`). All checks now validate the DaCe programs on model cells; the directory keeps its historical name `gt4py/`, and wasim-gt no longer contains gt4py code.
 
 ```sh
 # T-index snow, against a WaSiM run with per-step netCDF output (wasim-eth, tests/golden/run_case.py)
@@ -62,29 +62,41 @@ python3 tests/golden/run_case.py --binary <wasim> --template gt4py/doubs_snow_ti
     --case-dir path/to/Doubs --out runs/doubs_snow_tindex
 python3 gt4py/snow_tindex.py runs/doubs_snow_tindex path/to/Doubs/StateIni_2021 \
     path/to/Doubs/Input/grids/doubs500.lake_IDs2
+# exact per-step check of the DaCe T-index and snow evaporation, on grid dumps of the same run (grids and points: see its docstring)
+python3 gt4py/snow_tindex.py runs/doubs_snow_tindex path/to/Doubs/StateIni_2021 \
+    path/to/Doubs/Input/grids/doubs500.lake_IDs2 --dump <dump dir>
 
 # meteo interpolation and precipitation correction: 48 steps, exact numeric equality
 # Requires CONTROL_FILE.intern and supplemental static dumps (see meteo_interpolation.py).
 python3 gt4py/meteo_interpolation.py <dump dir> <run dir>/control.wasim <case dir> --static-dir <static dump dir>
-python3 gt4py/meteo_interpolation.py <dump dir> <run dir>/control.wasim <case dir> --backend gtfn_cpu --static-dir <static dump dir>
 
 # the newer checks read grid dumps (coupling.md, "How the ports are validated")
 python3 gt4py/interception.py <dump dir> <run dir>/control.wasim          # golden Doubs setup, interception method 11
 python3 gt4py/snow_evaporation.py <dump dir>                              # T-index setup (doubs_snow_tindex.wasim.in)
 python3 gt4py/snow_evaporation.py <dump dir> --energy-balance --pre after_snow1   # golden setup, snow method 7
-python3 gt4py/permafrost.py <dump dir> <run dir>/control.wasim         # Rhone variant with the permafrost model on (see its docstring)
+python3 gt4py/permafrost.py <dump dir> <run dir>/control.wasim         # Rhone variant rhone_permafrost.wasim.in (see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim   # golden Doubs setup, snow method 7 (grids and points: see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells   # Rhone
-python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # Rhone summer variant, glacier method 13 (see its docstring)
-python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics (see its docstring)
-python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++
+python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells --step-minutes 1440 --start 2021-01-01   # Rhone daily (golden/rhone/daily_jan.wasim.in)
+python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # rhone_glacier_melt(_debris).wasim.in, glacier method 13 (see its docstring)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_pointwise.py   # warm time per call of the DaCe snow evaporation, T-index, permafrost and glacier melt
+python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++; the DaCe functions inside a map
+python3 gt4py/glacier_dynamics.py --zero-glacier-snow <copy of the Rhone case>/StateIni_2021   # prepares the summer variant
+python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics, gt4py/rhone_glacier_summer.wasim.in (see its docstring)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_snow_glacier.py snow|glacier <dump dir> <run dir>/control.wasim ...   # warm time per call of the DaCe programs
 # radiation correction and potential ET (dumps after_meteo, after_expokorr, after_etp; see the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
-python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-06-01T24 --cellsize 500 --backend gtfn_cpu  # Rhone daily
+NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-06-01T24 --cellsize 500  # Rhone daily (DaCe, on model cells)
+# warm per-call timing of radiation correction, potential ET and vegetation parameters (OMP_NUM_THREADS=1)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01 --step 11
 # table-based phenology (vegetation grids at after_meteo)
 python3 gt4py/vegetation.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
 # dynamic phenology, synthetic Rhone case gt4py/rhone_dynphen.wasim.in (dump after_meteo; grid list in the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/dynamic_phenology.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T24
+# Richards column (#7), golden Doubs and Rhone setups (grids and points: see its docstring); --fix: independent columns
+python3 gt4py/richards.py <dump dir> <run dir>/control.wasim.intern [--fix]
+# routing, lakes and reservoirs (#12): WaSiM built with routing/wasim-routing-dump.patch (see validate.py)
+python3 gt4py/routing/validate.py --run <run dir> --dump <routing dump dir>
 ```
 
 The Doubs setup is `sample-run-doubs.zip`.
@@ -95,4 +107,4 @@ constructor, which explicitly disables them. Missing-value patterns must also ma
 compiled CPU checks, use a compiler with OpenMP, set `CXXFLAGS=-ffp-contract=off`, put the
 venv's CMake/Ninja on `PATH`, and use a fresh `GT4PY_BUILD_CACHE_DIR` after changing flags.
 
-`groundwater.py DUMP_DIR CONTROL_FILE --backend embedded|gtfn_cpu --json RESULT.json` compares all active cells and substeps at `after_etreal` → `after_gwflow`, including head, flow, balance and explicit soil/river handovers (target exactly zero).
+`groundwater.py DUMP_DIR CONTROL_FILE --json RESULT.json` (DaCe, on the model cells) compares all active cells and substeps at `after_etreal` → `after_gwflow`, including head, flow, balance and explicit soil/river handovers (target exactly zero).
