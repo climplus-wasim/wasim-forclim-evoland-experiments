@@ -16,8 +16,15 @@ in the dumped land-use grids).
 Dump these grids at after_meteo (WASIM_DUMP_GRIDS): [zone_grid], [elevation_model], landuse1..n,
 temperature, MeanThetaInRootZone, TemperatureAVG, TemperatureMOVAVG7, StartDayOfLeaveFall, and per
 layer SumOfForcingUnits, Pheno_start, SumOfChillingUnits, FStar_ForcingThreshold,
-MultipleStartTimes and the vegetation grids of vegetation.py. Run with NPY_DISABLE_CPU_FEATURES=X86_V4
-(numpy's vectorised exp and log differ from the C library in the last bit; see potential_et.py).
+MultipleStartTimes and the vegetation grids of vegetation.py. Grids missing from the dump are not
+compared (the dumps of the 577-day case are large: they can be made in parts, e.g. the phenology
+grids in one run and the vegetation grids in another, each with the inputs [zone_grid],
+[elevation_model], landuse1..n, temperature and MeanThetaInRootZone).
+
+The ports are DaCe programs on the model cells (wasim_gt.cells, cells of the zone grid): grids are
+gathered to cells, the state is carried on the cells, and compared with the dump on the same cells.
+Run with NPY_DISABLE_CPU_FEATURES=X86_V4 (numpy's vectorised exp and log differ from the C library
+in the last bit; the initialisation runs in numpy).
 
 usage: dynamic_phenology.py DUMP_DIR CONTROL_INTERN START [--layers N] [--steps N]
    START: first step as in WaSiM's input data, e.g. 2021-01-01T24 (daily) or 2021-01-01T01 (hourly)
@@ -25,9 +32,11 @@ usage: dynamic_phenology.py DUMP_DIR CONTROL_INTERN START [--layers N] [--steps 
 import argparse
 import datetime
 import re
+import time
 
 import numpy as np
 
+from wasim_gt.cells import CellLayout
 from wasim_gt.processes import dynamic_phenology as dp
 from wasim_gt.processes import vegetation as veg
 
@@ -109,9 +118,11 @@ def main():
     d = Dump(args.dump_dir)
     p = "after_meteo"
     active = d(p, "[zone_grid]")[0] > -9999
-    dhm = d(p, "[elevation_model]")[0]
+    cells = CellLayout.from_mask(active)
+    fld = cells.to_cells
+    dhm = fld(d(p, "[elevation_model]")[0])
     nl = args.layers
-    luse = [d(p, f"landuse{n}")[0] for n in range(1, nl + 1)]
+    luse = [fld(d(p, f"landuse{n}")[0]) for n in range(1, nl + 1)]
     temp = d(p, "temperature")
     throot = d(p, "MeanThetaInRootZone") if d.has(p, "MeanThetaInRootZone") else None
     nsteps = temp.shape[0] if not args.steps else min(args.steps, temp.shape[0])
@@ -131,52 +142,70 @@ def main():
     if end_year is None:
         end_year = last[2]
     day0, month0, year0, _ = wasim_time(0)
-    dem0 = initial_dem(text, dhm.shape)  # WaSiM initialises before the lake model lowers lake cells
-    state = dp.initial_state(table, luse, dem0, active, day0, month0, year0, end_year)
-    params = veg.vegetation_parameters(table, luse, dem0, active, day0, month0, year0, initial=True, dynamic=state)
+    dem0 = fld(initial_dem(text, active.shape))  # WaSiM initialises before the lake model lowers lake cells
+    state = dp.initial_state(table, luse, dem0, day0, month0, year0, end_year)
+    tables = veg.Table.from_table(table)
+    params = veg.vegetation_parameters(table, luse, dem0, day0, month0, year0, initial=True, dynamic=state,
+                                       tables=tables)
 
     names = {"forc": "SumOfForcingUnits", "tstart": "Pheno_start", "chill": "SumOfChillingUnits",
              "fstar": "FStar_ForcingThreshold", "mtstart": "MultipleStartTimes"}
     worst, first_bad = {}, {}
 
-    def compare(g, ours, ref, t):
-        diff = np.abs(ours - ref)[active]
+    def compare(g, ours, ref_grid, t):
+        if not d.has(p, ref_grid[0]):
+            return
+        ref = d(p, ref_grid[0])[t]
+        if ref_grid[1] is not None:
+            ref = ref[..., ref_grid[1]]
+        diff = np.abs(ours - fld(ref))
         w = float(np.nanmax(diff)) if diff.size else 0.0
         worst[g] = max(worst.get(g, 0.0), w)
         if w > 0 and g not in first_bad:
             first_bad[g] = t
 
+    t_dp, t_veg = [], []
     for t in range(nsteps):
         day, month, year, hr = wasim_time(t)
-        dp.accumulate_temperature(state, temp[t], step, active)
+        t1 = time.perf_counter()
+        dp.accumulate_temperature(state, fld(temp[t]), step)
+        t_acc = time.perf_counter() - t1
         day_end = veg.is_day_end(hr, 0, hour_offset)
         if day_end:
-            dp.day_end_update(state, table, luse, active, day, month, end_year,
-                              throot[t] if throot is not None else None)
-            params = veg.vegetation_parameters(table, luse, dhm, active, day, month, year, dynamic=state)
+            th = fld(throot[t]) if throot is not None else None
+            t1 = time.perf_counter()
+            dp.day_end_update(state, table, luse, day, month, end_year, th)
+            t_dp.append(time.perf_counter() - t1 + t_acc)
+            t1 = time.perf_counter()
+            params = veg.vegetation_parameters(table, luse, dhm, day, month, year, dynamic=state, tables=tables)
+            t_veg.append(time.perf_counter() - t1)
         for n in range(nl):
             for key, g in names.items():
                 ours = getattr(state, key)
                 if ours is None:
                     continue
-                compare(f"{g}{n + 1}", ours[n], d(p, f"{g}{n + 1}")[t], t)
+                compare(f"{g}{n + 1}", ours[n], (f"{g}{n + 1}", None), t)
             for key, g in GRIDS.items():
-                compare(f"{g}{n + 1}", params["layers"][n][key], d(p, f"{g}{n + 1}")[t], t)
-        compare("SurfaceEvaporationResistance", params["rse"], d(p, "SurfaceEvaporationResistance")[t], t)
+                compare(f"{g}{n + 1}", params["layers"][n][key], (f"{g}{n + 1}", None), t)
+        compare("SurfaceEvaporationResistance", params["rse"], ("SurfaceEvaporationResistance", None), t)
         if day_end:
-            compare("albedo", params["albedo"], d(p, "albedo")[t], t)
-        compare("StartDayOfLeaveFall", state.startfall, d(p, "StartDayOfLeaveFall")[t], t)
-        compare("TemperatureMOVAVG7", state.tmov, d(p, "TemperatureMOVAVG7")[t][..., :8], t)
+            compare("albedo", params["albedo"], ("albedo", None), t)
+        compare("StartDayOfLeaveFall", state.startfall, ("StartDayOfLeaveFall", None), t)
+        compare("TemperatureMOVAVG7", state.tmov, ("TemperatureMOVAVG7", slice(0, 8)), t)
         if day_end:
-            dp.reset_temperature_mean(state, active)
-        compare("TemperatureAVG", state.tavg, d(p, "TemperatureAVG")[t], t)
+            dp.reset_temperature_mean(state)
+        compare("TemperatureAVG", state.tavg, ("TemperatureAVG", None), t)
 
-    print(f"{active.sum()} active cells, {nsteps} steps of {step:g} min from {args.start}, end year {end_year}")
+    print(f"{cells.n} active cells, {nsteps} steps of {step:g} min from {args.start}, end year {end_year}, DaCe")
+    if len(t_dp) > 1:
+        print(f"warm ms per day (median, without the gather to cells): phenology {1000 * np.median(t_dp[1:]):.2f}, "
+              f"vegetation parameters {1000 * np.median(t_veg[1:]):.2f}")
     methods = sorted({(pos, lu.dynamic.method) for pos, lu in table.items() if lu.dynamic is not None})
     print("dynamic land uses (position, WaSiM method):", methods)
     print("largest absolute difference to WaSiM over all steps and active cells (first step with a difference):")
     for g, v in worst.items():
         print(f"  {g}: {v:.3g}" + (f" (step {first_bad[g]})" if g in first_bad else ""))
+    print("compared:", len(worst), "grids")
     return 0 if max(worst.values()) == 0.0 else 1
 
 

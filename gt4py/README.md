@@ -87,7 +87,9 @@ python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 202
 OMP_NUM_THREADS=1 python3 gt4py/benchmark_snow_glacier.py snow|glacier <dump dir> <run dir>/control.wasim ...   # warm time per call of the DaCe programs
 # radiation correction and potential ET (dumps after_meteo, after_expokorr, after_etp; see the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
-python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-06-01T24 --cellsize 500 --backend gtfn_cpu  # Rhone daily
+NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/potential_et.py <dump dir> <run dir>/control.wasim.intern 2021-06-01T24 --cellsize 500  # Rhone daily (DaCe, on model cells)
+# warm per-call timing of radiation correction, potential ET and vegetation parameters (OMP_NUM_THREADS=1)
+OMP_NUM_THREADS=1 python3 gt4py/benchmark_et.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01 --step 11
 # table-based phenology (vegetation grids at after_meteo)
 python3 gt4py/vegetation.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
 # dynamic phenology, synthetic Rhone case gt4py/rhone_dynphen.wasim.in (dump after_meteo; grid list in the script's header)
