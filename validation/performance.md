@@ -42,7 +42,10 @@ Single thread, clang 18 `-O3`, x86-64 (4 cores, this container), golden cases (1
 
 ## wasim-gt, per module
 
-Warm, single thread, same machine unless noted. ms per call (= per step):
+Warm, single thread, same machine unless noted. ms per call (= per step). For the DaCe programs the first
+number is the compiled SDFG called directly, the second the `@dace.program` call with numpy arguments,
+which adds about 3 ms of DaCe's argument handling per call (noisy: the machine was shared); the gather to
+cells is in neither:
 
 | Module | Backend | Doubs | Rhone | WaSiM Doubs / Rhone | Source |
 | --- | --- | --- | --- | --- | --- |
@@ -59,6 +62,11 @@ Warm, single thread, same machine unless noted. ms per call (= per step):
 | of which the Gauss-Seidel sweep (host Python) | | 6 | 14 | | |
 | snow part 1, method 7 | gt:cpu_ifirst | about 3 | | 1.68 / 6.38 | wasim-gt#19, macOS arm64 |
 | glacier dynamics (yearly, host) | — | | about 4 s per run | (not separable: inside snow part 2 on one day) | wasim-gt#24 |
+| snow evaporation, conventional (2 layers) | DaCe, compiled SDFG / `@dace.program` call | 0.14 / 3.1 | 0.30 / 3.1 | 0.14 / 0.39 | `benchmark_pointwise.py` |
+| snow evaporation, energy balance | DaCe | 0.11 / 4.4 | 0.25 / 2.8 | | |
+| T-index snow (method 1, run1 part) | DaCe | 0.20 / 6.9 | 0.45 / 3.5 | (inside snow part 1) | |
+| permafrost | DaCe | 0.28 / 5.6 | 0.26 / 3.4 | (inside snow part 1) | |
+| glacier melt, method 13 (every cell glacierized, 7 firn layers) | DaCe | 0.25 / 4.5 | 0.50 / 5.6 | (inside snow part 1) | |
 
 ## What the numbers say
 
