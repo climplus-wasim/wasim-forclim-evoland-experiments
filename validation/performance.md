@@ -83,6 +83,52 @@ average of about 4 (other agents), so absolute numbers are noisy. The DaCe build
 ScalarToSymbolPromotion (DaCe defect), and the rows are mapped in parallel (columns of a row in order, as
 WaSiM's row buffer requires).
 
+## The driver: whole steps and ensembles (wasim-gt #14)
+
+`gt4py/chained.py --no-check` times the driver's step (`wasim_gt.driver.Model.step`: every ported process in
+WaSiM's order, compiled programs called with prepared arguments, without dump I/O), median over steps 3-48 of
+the golden runs (hourly, January 2021). WaSiM: `WASIM_TIMING` of a run without dumps, one thread, the same 48
+steps; "ported part" sums the segments after_meteo -> after_snow2 and after_post_run -> after_routing (radiation
+correction to slides, plus routing), without meteo interpolation, phenology, the soil's zonal post-run and
+output. WaSiM's unsatzon segment also holds the soil, ET and groundwater pre-runs and, in Doubs, the 432
+river-link cells, which the driver takes from WaSiM (#8). Shared 4-core machine (another agent's runs), so
+numbers are noisy by about 10 %.
+
+| ms per step | WaSiM, whole step | WaSiM, ported part (unsatzon) | driver, 1 thread (Richards) | driver, 4 threads (Richards) |
+| --- | ---: | ---: | ---: | ---: |
+| Doubs, 6,022 cells | 99.5 | 73.7 (63.3) | 44.7 (37.3) | 21.8 (15.5) |
+| Rhone, 21,584 cells | 181.8 | 136.8 (111.9) | 105.9 (78.1) | 73.1 (43.7) |
+
+Per process, Doubs, one thread (driver / WaSiM, ms): radiation correction 0.42 / 0.38, potential ET 1.61 /
+1.57, interception 0.25 / 1.13, snow part 1 1.45 / 1.44, snow evaporation 0.12 / 0.14, Richards 37.3 / 63.3,
+groundwater 1.57 / 1.13, slides 0.75 / 4.19, total real ET 0.17, routing 0.37 / 0.42. Rhone's snow part 1
+(11.7 ms against 5.3) includes the glacier fraction and the ice melt through the process wrappers.
+
+**Python in the loop.** Calling the wrappers of interception and snow evaporation cost 6.9 and 3.0 ms per
+step (DaCe's argument handling) against 0.25 and 0.12 ms with arguments prepared once (`dace_call.Bound`). With
+the cell-wise programs and the Richards column bound, a profile of 23 Doubs steps on one thread puts 43 of
+48 ms in the compiled code: the Python loop over the processes, host scalars (sun geometry) and the
+remaining wrappers (radiation, ET, groundwater, slides) cost about 5 ms per step. A program fused over several
+steps could save at most that; it would have to contain the whole coupled step (the soil returns the pond,
+the real ET and the baseflow to ET, snow and groundwater every step), so it is not done.
+
+**Ensembles, members as extra cells** (`gt4py/ensemble_benchmark.py`, Doubs step 13, E members with the
+saturated conductivity or the interception capacity scaled per member; member 0 equals the single run bit for
+bit). ms per call and per member:
+
+| E | Richards, 1 thread | per member | Richards, 4 threads | per member | cell-wise chain, 1 thread | per member | 4 threads | per member |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 44.1 | 44.1 | 23.0 | 23.0 | 1.46 | 1.46 | 0.66 | 0.66 |
+| 4 | 193.0 | 48.2 | 77.4 | 19.3 | 5.61 | 1.40 | 2.91 | 0.73 |
+| 16 | 713.5 | 44.6 | 258.6 | 16.2 | 23.7 | 1.48 | 7.71 | 0.48 |
+
+WaSiM as separate processes (Doubs): one process 99.5 ms per step (unsatzon 63.3); two side by side 91 ms per
+step each, 45.5 ms per member-step (unsatzon 29.4); four on four cores give 3.5 times the throughput of one
+(above), about 28 ms per member-step (unsatzon about 18). The cell-wise chain (interception, snow, snow
+evaporation) costs WaSiM 2.7 ms per step, about 0.8 ms per member with four processes. On four threads the
+driver's Richards column runs 16 members at 16.2 ms per member, as fast as WaSiM's four processes, and the
+cell-wise chain at 0.48 ms per member; groundwater, routing and slides are not yet run as ensembles.
+
 ## What the numbers say
 
 - **On one CPU thread and at these grid sizes, the ports are 5–40 times slower than WaSiM per module.** The time hardly grows from Doubs to Rhone (3.6 times the cells): it is per-call overhead, not arithmetic. Potential ET, for example, is about ten small field-operator calls per layer and step plus their Python glue and host-device copies.
