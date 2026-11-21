@@ -54,7 +54,7 @@ Effort is given in tokens of agent work, measured on the ports so far, in [`coup
 
 ## Running the checks
 
-The scripts import the kernels from wasim-gt, so install it first: `pip install -e path/to/wasim-gt`.
+The scripts import the kernels from wasim-gt, so install it first: `pip install -e path/to/wasim-gt` (or run them with wasim-gt's `uv run` and `PYTHONPATH=gt4py`). All checks now validate the DaCe programs on model cells; the directory keeps its historical name `gt4py/`, and wasim-gt no longer contains gt4py code.
 
 ```sh
 # T-index snow, against a WaSiM run with per-step netCDF output (wasim-eth, tests/golden/run_case.py)
@@ -77,11 +77,10 @@ python3 gt4py/snow_evaporation.py <dump dir> --energy-balance --pre after_snow1 
 python3 gt4py/permafrost.py <dump dir> <run dir>/control.wasim         # Rhone variant rhone_permafrost.wasim.in (see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim   # golden Doubs setup, snow method 7 (grids and points: see its docstring)
 python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells   # Rhone
+python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells --step-minutes 1440 --start 2021-01-01   # Rhone daily (golden/rhone/daily_jan.wasim.in)
 python3 gt4py/glacier_melt.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # rhone_glacier_melt(_debris).wasim.in, glacier method 13 (see its docstring)
 OMP_NUM_THREADS=1 python3 gt4py/benchmark_pointwise.py   # warm time per call of the DaCe snow evaporation, T-index, permafrost and glacier melt
-python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics (see its docstring)
 python3 gt4py/soil/test_van_genuchten.py path/to/wasim-eth/src           # needs g++; the DaCe functions inside a map
-python3 gt4py/snow_energy_balance.py <dump dir> <run dir>/control.wasim --pre after_irrigation --input precipitation --ice GlacierizedCells --step-minutes 1440 --start 2021-01-01   # Rhone daily (golden/rhone/daily_jan.wasim.in)
 python3 gt4py/glacier_dynamics.py --zero-glacier-snow <copy of the Rhone case>/StateIni_2021   # prepares the summer variant
 python3 gt4py/glacier_dynamics.py <dump dir> <run dir>/control.wasim --start 2021-07-01   # glacier mass balance and yearly dynamics, gt4py/rhone_glacier_summer.wasim.in (see its docstring)
 OMP_NUM_THREADS=1 python3 gt4py/benchmark_snow_glacier.py snow|glacier <dump dir> <run dir>/control.wasim ...   # warm time per call of the DaCe programs
@@ -94,6 +93,10 @@ OMP_NUM_THREADS=1 python3 gt4py/benchmark_et.py <dump dir> <run dir>/control.was
 python3 gt4py/vegetation.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T01
 # dynamic phenology, synthetic Rhone case gt4py/rhone_dynphen.wasim.in (dump after_meteo; grid list in the script's header)
 NPY_DISABLE_CPU_FEATURES=X86_V4 python3 gt4py/dynamic_phenology.py <dump dir> <run dir>/control.wasim.intern 2021-01-01T24
+# Richards column (#7), golden Doubs and Rhone setups (grids and points: see its docstring); --fix: independent columns
+python3 gt4py/richards.py <dump dir> <run dir>/control.wasim.intern [--fix]
+# routing, lakes and reservoirs (#12): WaSiM built with routing/wasim-routing-dump.patch (see validate.py)
+python3 gt4py/routing/validate.py --run <run dir> --dump <routing dump dir>
 ```
 
 The Doubs setup is `sample-run-doubs.zip`.

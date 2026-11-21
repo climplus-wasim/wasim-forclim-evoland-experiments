@@ -16,9 +16,9 @@ ssto_onGlac_), so that ice and firn melt (rhone_glacier_melt.wasim.in). A second
 debris grid (internal standard grid debris_on_glaciers, readcode = 0, value 0.7) and a global debris
 scaling factor of 0.9 to reach the debris factor (rhone_glacier_melt_debris.wasim.in).
 
-Step 3 is a DaCe program on the model cells (wasim_gt.cells): grids are gathered to the active cells, the
-program runs on all of them, and its outputs are compared with the dump on the glacierized cells. Steps 1
-and 2 (snow_energy_balance) are still gt4py on the grid, with the gt:cpu_ifirst backend.
+All three steps are DaCe programs on the model cells (wasim_gt.cells): grids are gathered to the active cells,
+the programs run on all of them (step 2 with `active` set on the glacierized cells only), and their outputs are
+compared with the dump on the active (step 1) or glacierized cells (steps 2 and 3).
 
 Grids to dump at start, after_meteo, after_irrigation and after_snow1: those of snow_energy_balance.py,
 plus GlacierizedCells, global_radiation, firn_WE_stack, melt_from_ice, melt_from_firn,
@@ -41,8 +41,6 @@ from wasim_gt.processes.snow_energy_balance import snow_energy_balance
 
 from snow_energy_balance import control_section, difference, landuse_albedo, snow_parameters
 from wasim_dump import Dump
-
-SNOW_BACKEND = "gt:cpu_ifirst"  # of the gt4py snow_energy_balance (steps 1 and 2)
 
 GLACIER_SNOW = {"snowstorage_solid": "SolidSnowStorage_onGlacier", "snowstorage_liquid": "LiquidSnowStorage_onGlacier",
                 "snow_storage_total": "TotalSnowStorage_onGlacier", "snowtemp": "snowtemp_onGlacier",
@@ -100,10 +98,11 @@ def main():
     params = GlacierMeltParameters(t0=snow.t0, debris_scaling=scaling)
     active = d("start", "[zone_grid]")[0] > -9999
     lu_alb, unobserved = landuse_albedo(d, active, args.pre, args.first_hour)
-    elevation = d("start", "[elevation_model]")[0]
     nsteps = d(args.pre, "snowstorage_solid").shape[0]
     cells = CellLayout.from_mask(active)
     fld = cells.to_cells
+    elevation = fld(d("start", "[elevation_model]")[0])
+    all_cells = np.ones(cells.n, dtype=bool)
     start = dt.datetime.fromisoformat(args.start)
     t_call = []
 
@@ -113,51 +112,51 @@ def main():
 
     counts = dict(ice_melt=0, firn_melt=0)
     for t in range(nsteps):
-        pre = lambda name: d(args.pre, name)[t]
-        post = lambda name: d("after_snow1", name)[t]
-        ice = pre("GlacierizedCells")
-        glacier = active & (ice > 0)
+        pre = lambda name: fld(d(args.pre, name)[t])
+        post = lambda name: fld(d("after_snow1", name)[t])
+        glacier = active & (d(args.pre, "GlacierizedCells")[t] > 0)  # on the grid, for the summary
+        on_glacier = pre("GlacierizedCells") > 0
         no_snow = ((pre("lake_codes") > 0) & (pre("ponding_storage") > 0)).astype(float)
         base = dict(temperature=pre("corr_temperature"), deposition_index=pre("deposition_index"),
                     air_humidity=pre("air_humidity"), cloudiness=pre("cloudiness"),
                     radiation=pre("AspectCorrectedGlobalRadiation"), wind_speed=pre("wind_speed"), elevation=elevation,
-                    landuse_albedo=lu_alb[t], no_snow=no_snow)
-        first = snow_energy_balance(dict(base, precipitation=pre(args.input), active=active.astype(float),
+                    landuse_albedo=fld(lu_alb[t]), no_snow=no_snow)
+        first = snow_energy_balance(dict(base, precipitation=pre(args.input), active=np.ones(cells.n),
                                          snowstorage_solid=pre("snowstorage_solid"),
                                          snowstorage_liquid=pre("snowstorage_liquid"), snowtemp=pre("snowtemp"),
                                          surftemp=pre("surftemp"), snow_age=pre("snow_age")),
-                                    snow, args.step_minutes, backend=SNOW_BACKEND)
+                                    snow, args.step_minutes)
         for k in FIRST_CALL:
-            check(k, first[k], post(k), active)
-        gl = snow_energy_balance(dict(base, precipitation=first["precipitation"], active=glacier.astype(float),
+            check(k, first[k], post(k), all_cells)
+        gl = snow_energy_balance(dict(base, precipitation=first["precipitation"], active=on_glacier.astype(float),
                                       snowstorage_solid=pre(GLACIER_SNOW["snowstorage_solid"]),
                                       snowstorage_liquid=pre(GLACIER_SNOW["snowstorage_liquid"]),
                                       snowtemp=pre(GLACIER_SNOW["snowtemp"]), surftemp=pre(GLACIER_SNOW["surftemp"]),
                                       snow_age=pre("snow_age"), snow_fraction=first["snow_fraction"],
                                       rain_fraction=first["rain_fraction"], albedo_used=first["albedo_used"]),
-                                 snow, args.step_minutes, backend=SNOW_BACKEND, on_glacier=True)
+                                 snow, args.step_minutes, on_glacier=True)
         for k, name in GLACIER_SNOW.items():
-            check(name, gl[k], post(name), glacier)
+            check(name, gl[k], post(name), on_glacier)
 
         # the date of the step's end time: at 24:00 WaSiM already uses the next day (checked against the dumps)
         day = start + dt.timedelta(hours=t + args.first_hour)
         a_ice = radiation_coefficient(glac["ice_min"], glac["ice_max"], day.day, day.month)
         a_snow = radiation_coefficient(glac["snow_min"], glac["snow_max"], day.day, day.month)
-        on_glacier = cells.to_cells(glacier, dtype=bool)
-        inputs = (fld(pre("corr_temperature")), fld(gl["snowstorage_solid"]), fld(gl["melt"]), fld(pre("firn_WE_stack")),
-                  fld(pre("global_radiation")), glac["mf"], a_ice, a_snow, fld(debris), on_glacier)
+        inputs = (pre("corr_temperature"), gl["snowstorage_solid"], gl["melt"], pre("firn_WE_stack"),
+                  pre("global_radiation"), glac["mf"], a_ice, a_snow, fld(debris), on_glacier)
         t0 = time.perf_counter()
         qice, qfirn, stack = glacier_melt(*inputs, params, args.step_minutes)
         t_call.append(time.perf_counter() - t0)
-        check("melt_from_ice", qice, fld(post("melt_from_ice")), on_glacier)
-        check("melt_from_firn", qfirn, fld(post("melt_from_firn")), on_glacier)
-        ref_stack = fld(post("firn_WE_stack"))
+        check("melt_from_ice", qice, post("melt_from_ice"), on_glacier)
+        check("melt_from_firn", qfirn, post("melt_from_firn"), on_glacier)
+        ref_stack = post("firn_WE_stack")
         for k in range(stack.shape[1]):
             check(f"firn_WE_stack[{k}]", stack[:, k], ref_stack[:, k], on_glacier)
-        counts["ice_melt"] += int((post("melt_from_ice")[glacier] > 0).sum())
-        counts["firn_melt"] += int((post("melt_from_firn")[glacier] > 0).sum())
+        counts["ice_melt"] += int((post("melt_from_ice")[on_glacier] > 0).sum())
+        counts["firn_melt"] += int((post("melt_from_firn")[on_glacier] > 0).sum())
 
-    print(f"{cells.n} active cells, {int(glacier.sum())} glacierized, {nsteps} steps, glacier melt in DaCe, {counts}, "
+    print(f"{cells.n} active cells, {int(glacier.sum())} glacierized, {nsteps} steps, snow and glacier melt in DaCe, "
+          f"{counts}, "
           f"{unobserved} cell-steps with an unobserved land-use albedo")
     print(f"glacier melt: warm call {1000 * float(np.median(t_call[1:])):.3f} ms (median, without the gather)")
     print("largest absolute difference to WaSiM (inf: NaN or nodata patterns differ):")
